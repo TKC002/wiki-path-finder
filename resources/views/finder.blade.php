@@ -124,6 +124,86 @@
             margin: 0.6rem 0;
             text-align: center;
         }
+        .progress {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            margin-top: 1rem;
+        }
+        .progress h3 {
+            margin: 0 0 0.75rem;
+            font-size: 0.95rem;
+            color: #4a5568;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .progress h3 .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #48bb78;
+            animation: pulse 1s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .progress-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        .progress-stat {
+            background: #fff;
+            border-radius: 6px;
+            padding: 0.6rem;
+            text-align: center;
+            border: 1px solid #e2e8f0;
+        }
+        .progress-stat .num { font-size: 1.5rem; font-weight: 700; color: #5a67d8; line-height: 1; }
+        .progress-stat .label { font-size: 0.72rem; color: #718096; margin-top: 0.3rem; }
+        .progress-log {
+            max-height: 180px;
+            overflow-y: auto;
+            background: #1a202c;
+            color: #e2e8f0;
+            border-radius: 6px;
+            padding: 0.6rem 0.8rem;
+            font-family: ui-monospace, "SF Mono", Consolas, monospace;
+            font-size: 0.78rem;
+            line-height: 1.5;
+        }
+        .progress-log .line { white-space: pre-wrap; }
+        .progress-log .fwd { color: #68d391; }
+        .progress-log .bwd { color: #f6ad55; }
+        .progress-log .meet { color: #f687b3; font-weight: 700; }
+        .progress h3 {
+            justify-content: space-between; /* タイマーを右寄せにする */
+        }
+        .progress h3 .title-left {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .elapsed-timer {
+            font-family: ui-monospace, "SF Mono", Consolas, monospace;
+            font-size: 0.85rem;
+            color: #4a5568;
+            background: #edf2f7;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-variant-numeric: tabular-nums;
+        }
+        .elapsed-timer.stalled {
+            background: #fed7d7;
+            color: #c53030;
+        }
+        .elapsed-timer.done {
+            background: #c6f6d5;
+            color: #22543d;
+        }
     </style>
 </head>
 <body>
@@ -161,64 +241,189 @@
         const form = document.getElementById('pathForm');
         const resultDiv = document.getElementById('result');
         const submitBtn = document.getElementById('submitBtn');
-        const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+        let currentSource = null;
 
-        form.addEventListener('submit', async (e) => {
+        form.addEventListener('submit', (e) => {
             e.preventDefault();
+
+            if (currentSource) currentSource.close();
+
             const startUrl = document.getElementById('start_url').value.trim();
             const goalUrl  = document.getElementById('goal_url').value.trim();
 
+            // ★ 進捗パネル(タイマー追加)
             resultDiv.innerHTML = `
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <p>探索中… しばらくお待ちください</p>
-                </div>`;
+                <div class="progress" id="progressPanel">
+                    <h3>
+                        <span class="title-left"><span class="dot"></span><span id="progressTitle">接続中…</span></span>
+                        <span class="elapsed-timer" id="elapsedTimer">0.0s</span>
+                    </h3>
+                    <div class="progress-grid">
+                        <div class="progress-stat"><div class="num" id="statDepth">0</div><div class="label">現在の層</div></div>
+                        <div class="progress-stat"><div class="num" id="statVisited">0</div><div class="label">探索ノード数</div></div>
+                        <div class="progress-stat"><div class="num" id="statApi">0</div><div class="label">APIリクエスト</div></div>
+                    </div>
+                    <div class="progress-log" id="progressLog"></div>
+                </div>
+            `;
             submitBtn.disabled = true;
             submitBtn.textContent = '探索中…';
 
-            try {
-                const res = await fetch('{{ route("finder.find") }}', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest', // ★ Laravel がAJAXとして扱う
-                        'X-CSRF-TOKEN': csrfToken,
-                    },
-                    body: JSON.stringify({ start_url: startUrl, goal_url: goalUrl }),
-                });
+            const url = '{{ route("finder.stream") }}'
+                + '?start_url=' + encodeURIComponent(startUrl)
+                + '&goal_url='  + encodeURIComponent(goalUrl);
 
-                const text = await res.text();
-                let data = null;
-                try { data = JSON.parse(text); } catch (_) { /* JSONでない */ }
+            const source = new EventSource(url);
+            currentSource = source;
 
-                if (!res.ok || !data) {
-                    // ★ 原因特定用に全部出す
-                    const detail = data?.error
-                        ?? data?.message
-                        ?? text
-                        ?? '(レスポンス本文なし)';
-                    resultDiv.innerHTML = `
-                        <div class="error">
-                            <strong>❌ エラー (HTTP ${res.status})</strong>
-                            <pre style="white-space:pre-wrap; margin-top:.5rem; font-size:.8rem;">${escapeHtml(String(detail)).slice(0, 4000)}</pre>
-                        </div>`;
-                    console.error('[finder] error', res.status, text);
-                    return;
+            const startedAt    = performance.now();
+            let lastEventAt    = startedAt;     // 最後にサーバーから何か来た時刻
+            let timerRafId     = null;
+            let timerStopped   = false;
+            let lastDepth      = 0;
+
+            // ★ タイマー更新ループ
+            const tick = () => {
+                if (timerStopped) return;
+                const elapsedMs   = performance.now() - startedAt;
+                const sinceLastMs = performance.now() - lastEventAt;
+                const timerEl = document.getElementById('elapsedTimer');
+                if (timerEl) {
+                    timerEl.textContent = (elapsedMs / 1000).toFixed(1) + 's';
+                    // 5秒以上サーバーから音沙汰なし → 警告色
+                    timerEl.classList.toggle('stalled', sinceLastMs > 5000);
                 }
-                renderPath(data);
-            } catch (err) {
-                resultDiv.innerHTML = `<div class="error">❌ 通信エラー: ${escapeHtml(err.message)}</div>`;
-            } finally {
+                timerRafId = requestAnimationFrame(tick);
+            };
+            timerRafId = requestAnimationFrame(tick);
+
+            const stopTimer = (state) => {
+                timerStopped = true;
+                if (timerRafId) cancelAnimationFrame(timerRafId);
+                const timerEl = document.getElementById('elapsedTimer');
+                if (timerEl) {
+                    timerEl.classList.remove('stalled');
+                    if (state === 'done') timerEl.classList.add('done');
+                    const final = ((performance.now() - startedAt) / 1000).toFixed(2);
+                    timerEl.textContent = final + 's';
+                }
+            };
+
+            const setStat = (id, val) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = val;
+            };
+            const log = (msg, cls = '') => {
+                const box = document.getElementById('progressLog');
+                if (!box) return;
+                const line = document.createElement('div');
+                line.className = 'line ' + cls;
+                const t = ((performance.now() - startedAt) / 1000).toFixed(2);
+                line.textContent = `[${t.padStart(6)}s] ${msg}`;
+                box.appendChild(line);
+                box.scrollTop = box.scrollHeight;
+            };
+            const updateCounters = (d) => {
+                if (typeof d.visited_count === 'number') setStat('statVisited', d.visited_count.toLocaleString());
+                if (typeof d.api_calls === 'number')     setStat('statApi', d.api_calls.toLocaleString());
+            };
+            // ★ 何かイベントが来るたびに「最後の音沙汰」を更新
+            const touch = () => { lastEventAt = performance.now(); };
+
+            source.addEventListener('connected', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                document.getElementById('progressTitle').textContent = '探索を開始します';
+                log(`接続完了: ${d.start.title} → ${d.goal.title}`);
+            });
+
+            source.addEventListener('normalize', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`タイトル正規化(${d.role}): ${d.title}`);
+                updateCounters(d);
+            });
+
+            source.addEventListener('search_start', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`探索開始: 「${d.start}」 ⇄ 「${d.goal}」(最大${d.max_depth_total}クリック)`);
+            });
+
+            source.addEventListener('layer_start', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                lastDepth = d.total_depth;
+                setStat('statDepth', d.total_depth);
+                const arrow = d.direction === 'forward' ? '→' : '←';
+                const cls   = d.direction === 'forward' ? 'fwd' : 'bwd';
+                document.getElementById('progressTitle').textContent =
+                    `第${d.total_depth}層を探索中(${d.direction === 'forward' ? '前方' : '後方'} 深度${d.depth})`;
+                log(`${arrow} 第${d.total_depth}層 [${d.direction}] フロンティア=${d.frontier_size.toLocaleString()}件を展開`, cls);
+                updateCounters(d);
+            });
+
+            source.addEventListener('chunk_done', (ev) => {
+                touch();
+                updateCounters(JSON.parse(ev.data));
+            });
+
+            source.addEventListener('layer_end', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                const cls = d.direction === 'forward' ? 'fwd' : 'bwd';
+                log(`  ↳ 完了: 次フロンティア=${d.new_frontier_size.toLocaleString()}件`, cls);
+                updateCounters(d);
+            });
+
+            source.addEventListener('meeting', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`★ 中間で出会いました: 「${d.node}」`, 'meet');
+            });
+
+            source.addEventListener('result', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                renderPath(d, lastDepth);
+            });
+
+            source.addEventListener('error', (ev) => {
+                if (!ev.data) return;
+                try {
+                    touch();
+                    const d = JSON.parse(ev.data);
+                    renderError(d.message || '不明なエラーが発生しました。');
+                } catch (_) {}
+            });
+
+            source.addEventListener('done', () => {
+                source.close();
+                currentSource = null;
+                stopTimer('done');         // ★ タイマー停止
                 submitBtn.disabled = false;
                 submitBtn.textContent = '最短経路を探す';
-            }
-        });
+            });
 
-        function renderPath({ clicks, path }) {
+            source.onerror = () => {
+                if (source.readyState === EventSource.CLOSED) {
+                    stopTimer();           // ★ 接続切れでも停止
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '最短経路を探す';
+                }
+            };
+        });
+        function renderPath({ clicks, path }, finalDepth) {
+            // 進捗パネルを完了状態にしてから結果を下に追加
+            const panel = document.getElementById('progressPanel');
+            if (panel) {
+                panel.querySelector('.dot').style.background = '#48bb78';
+                panel.querySelector('.dot').style.animation = 'none';
+                document.getElementById('progressTitle').textContent = `探索完了(到達層: ${finalDepth || clicks})`;
+            }
             const last = path.length - 1;
             let html = `
-                <div class="success-banner">
+                <div class="success-banner" style="margin-top:1rem;">
                     <span class="clicks-num">${clicks}</span>
                     <span class="clicks-label">クリックで到達できます!</span>
                 </div>
@@ -230,7 +435,12 @@
                 if (i < last) html += '<div class="path-arrow">↓</div>';
             });
             html += '</div>';
-            resultDiv.innerHTML = html;
+            resultDiv.insertAdjacentHTML('beforeend', html);
+        }
+
+        function renderError(msg) {
+            resultDiv.insertAdjacentHTML('beforeend',
+                `<div class="error" style="margin-top:1rem;">❌ ${escapeHtml(msg)}</div>`);
         }
 
         function escapeHtml(s) {

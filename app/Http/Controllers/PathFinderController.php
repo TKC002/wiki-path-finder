@@ -7,6 +7,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 // ★ extends Controller を外す(Laravel 11/12 対策)
 class PathFinderController
@@ -14,6 +15,81 @@ class PathFinderController
     public function index(): View
     {
         return view('finder');
+    }
+
+    /** SSE版: 進捗をリアルタイムに流す */
+    public function stream(Request $request): StreamedResponse
+    {
+        $startUrl = (string) $request->query('start_url', '');
+        $goalUrl  = (string) $request->query('goal_url', '');
+
+        return response()->stream(function () use ($startUrl, $goalUrl) {
+            // 出力バッファを全部潰す(既存のobレベルを完全に外す)
+            while (ob_get_level() > 0) {
+                @ob_end_flush();
+            }
+            // ストリーミング用の細かいチューニング
+            @ini_set('zlib.output_compression', '0');
+            @ini_set('output_buffering', 'off');
+            @ini_set('implicit_flush', '1');
+            ignore_user_abort(false);
+            set_time_limit(300);
+
+            $send = function (string $event, array $data) {
+                echo "event: {$event}\n";
+                echo 'data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) . "\n\n";
+                @ob_flush();
+                @flush();
+            };
+
+            $start = WikipediaPathFinder::parseUrl($startUrl);
+            $goal  = WikipediaPathFinder::parseUrl($goalUrl);
+
+            if (!$start || !$goal) {
+                $send('error', ['message' => '有効なWikipediaのURLを入力してください。']);
+                $send('done', []);
+                return;
+            }
+            if ($start['lang'] !== $goal['lang']) {
+                $send('error', ['message' => 'スタートとゴールは同じ言語版である必要があります。']);
+                $send('done', []);
+                return;
+            }
+
+            $send('connected', ['start' => $start, 'goal' => $goal]);
+
+            try {
+                $finder = new WikipediaPathFinder($start['lang']);
+                $finder->setProgressCallback(function (string $event, array $payload) use ($send) {
+                    $send($event, $payload);
+                });
+
+                $result = $finder->findPath($start['title'], $goal['title']);
+
+                if (isset($result['error'])) {
+                    $send('error', ['message' => $result['error']]);
+                } else {
+                    $path = array_map(fn ($t) => [
+                        'title' => $t,
+                        'url'   => $finder->titleToUrl($t),
+                    ], $result['path']);
+                    $send('result', [
+                        'clicks' => $result['clicks'],
+                        'path'   => $path,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::error('[finder] stream exception', ['message' => $e->getMessage(), 'line' => $e->getLine(), 'file' => $e->getFile()]);
+                $send('error', ['message' => sprintf('[%s] %s', class_basename($e), $e->getMessage())]);
+            }
+
+            $send('done', []);
+        }, 200, [
+            'Content-Type'      => 'text/event-stream; charset=UTF-8',
+            'Cache-Control'     => 'no-cache, no-transform',
+            'X-Accel-Buffering' => 'no',
+            'Connection'        => 'keep-alive',
+        ]);
     }
 
     public function findPath(Request $request): JsonResponse
