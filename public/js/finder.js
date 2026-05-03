@@ -40,7 +40,11 @@
     form.addEventListener('submit', (e) => {
         e.preventDefault();
 
-        if (currentSource) currentSource.close();
+        // ★ 既存の EventSource を確実に閉じる
+        if (currentSource) {
+            currentSource.close();
+            currentSource = null;
+        }
 
         const startUrl = document.getElementById('start_url').value.trim();
         const goalUrl = document.getElementById('goal_url').value.trim();
@@ -67,11 +71,13 @@
         submitBtn.disabled = true;
         submitBtn.textContent = '探索中…';
 
+        // ★ URL / URLSearchParams で構築して二重エンコードを防止
         const depth = parseInt(depthSlider.value, 10);
-        const url = STREAM_URL
-            + '?start_url=' + encodeURIComponent(startUrl)
-            + '&goal_url=' + encodeURIComponent(goalUrl)
-            + '&depth=' + depth;
+        const streamParams = new URLSearchParams();
+        streamParams.set('start_url', startUrl);
+        streamParams.set('goal_url', goalUrl);
+        streamParams.set('depth', depth);
+        const url = STREAM_URL + '?' + streamParams.toString();
 
         const source = new EventSource(url);
         currentSource = source;
@@ -235,6 +241,15 @@
             } catch (_) { }
         });
 
+        source.addEventListener('retry', (ev) => {
+            touch();
+            const d = JSON.parse(ev.data);
+            const arrow = d.direction === 'forward' ? '→' : '←';
+            const cls = d.direction === 'forward' ? 'fwd' : 'bwd';
+            log(`⟳ [${d.direction}] フロンティアが空のためリトライ(${d.attempt}/2)`, cls);
+            updateCounters(d);
+        });
+
         source.addEventListener('done', () => {
             source.close();
             currentSource = null;
@@ -244,6 +259,9 @@
         });
 
         source.onerror = () => {
+            // ★ 重複クリーンアップを防ぐガード
+            if (source !== currentSource) return;
+
             source.close();
             currentSource = null;
             stopTimer();

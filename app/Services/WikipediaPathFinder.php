@@ -95,9 +95,11 @@ class WikipediaPathFinder
     {
         $url = trim($url);
 
-        // 二重エンコードを検出して1段デコード
-        // %25E3 のような「% のエンコード」が含まれていたらデコードする
-        if (preg_match('/%25[0-9A-Fa-f]{2}/', $url)) {
+        // ★ 多重エンコードを安全にデコード（最大5回まで）
+        for ($i = 0; $i < 5; $i++) {
+            if (!preg_match('/%25[0-9A-Fa-f]{2}/', $url)) {
+                break;
+            }
             $url = rawurldecode($url);
         }
 
@@ -180,6 +182,22 @@ class WikipediaPathFinder
                 ]);
                 $meeting = $this->expandForward($fwdFrontier, $fwdParents, $bwdChildren);
                 $fwdDepth++;
+
+                // ★ フロンティアが空 → API失敗の可能性があるので最大2回リトライ
+                if (!$meeting['found'] && empty($meeting['frontier'])) {
+                    for ($retry = 1; $retry <= 2; $retry++) {
+                        $this->emit('retry', [
+                            'direction' => 'forward',
+                            'attempt' => $retry,
+                            'frontier_size' => count($fwdFrontier),
+                        ]);
+                        $meeting = $this->expandForward($fwdFrontier, $fwdParents, $bwdChildren);
+                        if ($meeting['found'] || !empty($meeting['frontier'])) {
+                            break;
+                        }
+                    }
+                }
+
                 $this->emit('layer_end', [
                     'direction' => 'forward',
                     'depth' => $fwdDepth,
@@ -199,6 +217,22 @@ class WikipediaPathFinder
                 ]);
                 $meeting = $this->expandBackward($bwdFrontier, $bwdChildren, $fwdParents);
                 $bwdDepth++;
+
+                // ★ フロンティアが空 → API失敗の可能性があるので最大2回リトライ
+                if (!$meeting['found'] && empty($meeting['frontier'])) {
+                    for ($retry = 1; $retry <= 2; $retry++) {
+                        $this->emit('retry', [
+                            'direction' => 'backward',
+                            'attempt' => $retry,
+                            'frontier_size' => count($bwdFrontier),
+                        ]);
+                        $meeting = $this->expandBackward($bwdFrontier, $bwdChildren, $fwdParents);
+                        if ($meeting['found'] || !empty($meeting['frontier'])) {
+                            break;
+                        }
+                    }
+                }
+
                 $this->emit('layer_end', [
                     'direction' => 'backward',
                     'depth' => $bwdDepth,
@@ -300,14 +334,20 @@ class WikipediaPathFinder
      */
     private function chooseSide(array $fwdFrontier, array $bwdFrontier, int $fwdDepth, int $bwdDepth): ?string
     {
-        $fwdExhausted = empty($fwdFrontier) || $fwdDepth >= $this->maxDepthPerSide;
-        $bwdExhausted = empty($bwdFrontier) || $bwdDepth >= $this->maxDepthPerSide;
 
-        if ($fwdExhausted && $bwdExhausted)
+        // ★ どちらかのフロンティアが空 = グラフが断絶しているので経路は存在しない
+        if (empty($fwdFrontier) || empty($bwdFrontier)) {
             return null;
-        if ($fwdExhausted)
+        }
+
+        $fwdAtLimit = $fwdDepth >= $this->maxDepthPerSide;
+        $bwdAtLimit = $bwdDepth >= $this->maxDepthPerSide;
+
+        if ($fwdAtLimit && $bwdAtLimit)
+            return null;
+        if ($fwdAtLimit)
             return 'backward';
-        if ($bwdExhausted)
+        if ($bwdAtLimit)
             return 'forward';
 
         return count($fwdFrontier) <= count($bwdFrontier) ? 'forward' : 'backward';
