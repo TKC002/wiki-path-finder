@@ -110,6 +110,12 @@ class PageRepository
                 $result[$id] = 'missing';
                 continue;
             }
+            // リンク数0はAPI失敗の可能性があるため常に再取得
+            if ($meta->link_count === 0) {
+                $result[$id] = 'stale';
+                continue;
+            }
+
             $hoursOld = $meta->fetched_at->diffInHours($now);
             if ($hoursOld < $freshTtl) {
                 $result[$id] = 'fresh';
@@ -170,6 +176,12 @@ class PageRepository
                 $result[$id] = 'missing';
                 continue;
             }
+            // リンク数0はAPI失敗の可能性があるため常に再取得
+            if ($meta->incoming_link_count === 0) {
+                $result[$id] = 'stale';
+                continue;
+            }
+
             $hoursOld = $meta->incoming_fetched_at->diffInHours($now);
             if ($hoursOld < $freshTtl) {
                 $result[$id] = 'fresh';
@@ -183,12 +195,22 @@ class PageRepository
     /** Incoming メタ情報を更新 */
     public function upsertIncomingMeta(int $pageId, int $incomingLinkCount): void
     {
-        PageMeta::updateOrCreate(
-            ['page_id' => $pageId],
-            [
+        $meta = PageMeta::find($pageId);
+        if ($meta) {
+            // 既存行: incoming 側のカラムだけ更新
+            $meta->update([
                 'incoming_fetched_at'  => Carbon::now(),
                 'incoming_link_count'  => $incomingLinkCount,
-            ]
-        );
+            ]);
+        } else {
+            // 新規行: fetched_at (outgoing側) は NOT NULL なので
+            // 十分古い値を入れて stale 扱いにする
+            PageMeta::create([
+                'page_id'              => $pageId,
+                'fetched_at'           => Carbon::createFromTimestamp(0),
+                'incoming_fetched_at'  => Carbon::now(),
+                'incoming_link_count'  => $incomingLinkCount,
+            ]);
+        }
     }
 }
