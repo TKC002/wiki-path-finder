@@ -25,9 +25,9 @@ class WikipediaApiClient
 
     public function __construct(string $lang = 'ja')
     {
-        $this->lang     = $lang;
-        $this->apiUrl   = "https://{$lang}.wikipedia.org/w/api.php";
-        $this->timeout  = (int) config('finder.timeout', 15);
+        $this->lang = $lang;
+        $this->apiUrl = "https://{$lang}.wikipedia.org/w/api.php";
+        $this->timeout = (int) config('finder.timeout', 15);
         $this->poolSize = (int) config('finder.pool_size', 20);
     }
 
@@ -45,21 +45,56 @@ class WikipediaApiClient
      * タイトルを正規化(リダイレクト追従)
      * @return string|null  正規化されたタイトル、なければnull
      */
+    /**
+     * タイトルを正規化(リダイレクト追従)
+     * @return string|null  正規化されたタイトル、なければnull
+     */
     public function normalizeTitle(string $title): ?string
     {
         $response = $this->get([
-            'action'        => 'query',
-            'titles'        => $title,
-            'redirects'     => 1,
-            'format'        => 'json',
+            'action' => 'query',
+            'titles' => $title,
+            'redirects' => 1,
+            'format' => 'json',
             'formatversion' => 2,
         ]);
 
-        if (!$response || !$response->ok()) return null;
+        if (!$response) {
+            Log::warning('[WikipediaApiClient] normalizeTitle: no response', ['title' => $title]);
+            return null;
+        }
+        if (!$response->ok()) {
+            Log::warning('[WikipediaApiClient] normalizeTitle: HTTP error', [
+                'title'  => $title,
+                'status' => $response->status(),
+                'body'   => substr($response->body(), 0, 500),
+            ]);
+            return null;
+        }
 
         $page = $response->json('query.pages.0');
-        if (!$page || isset($page['missing']) || isset($page['invalid'])) return null;
-        if (($page['ns'] ?? null) !== 0) return null;
+        if (!$page) {
+            Log::warning('[WikipediaApiClient] normalizeTitle: no page in response', [
+                'title' => $title,
+                'body'  => substr($response->body(), 0, 500),
+            ]);
+            return null;
+        }
+        if (isset($page['missing'])) {
+            Log::info('[WikipediaApiClient] normalizeTitle: page missing', ['title' => $title]);
+            return null;
+        }
+        if (isset($page['invalid'])) {
+            Log::warning('[WikipediaApiClient] normalizeTitle: invalid title', ['title' => $title]);
+            return null;
+        }
+        if (($page['ns'] ?? null) !== 0) {
+            Log::warning('[WikipediaApiClient] normalizeTitle: not main namespace', [
+                'title' => $title,
+                'ns'    => $page['ns'] ?? 'null',
+            ]);
+            return null;
+        }
 
         return $page['title'];
     }
@@ -76,12 +111,12 @@ class WikipediaApiClient
 
         do {
             $params = [
-                'action'        => 'query',
-                'titles'        => $title,
-                'prop'          => 'links',
-                'pllimit'       => 'max',
-                'plnamespace'   => 0,
-                'format'        => 'json',
+                'action' => 'query',
+                'titles' => $title,
+                'prop' => 'links',
+                'pllimit' => 'max',
+                'plnamespace' => 0,
+                'format' => 'json',
                 'formatversion' => 2,
             ];
             if ($plcontinue !== null) {
@@ -89,13 +124,21 @@ class WikipediaApiClient
             }
 
             $response = $this->get($params);
-            if (!$response || !$response->ok()) break;
+            if (!$response || !$response->ok()) {
+                // 途中で失敗した場合、それまでに集めたリンクは返す(部分的な結果)
+                Log::warning('[WikipediaApiClient] getAllOutgoingLinks partial failure', [
+                    'title' => $title,
+                    'collected_so_far' => count($allLinks),
+                ]);
+                break;
+            }
 
             $data = $response->json();
 
             // ページが存在しない場合
             $page = $data['query']['pages'][0] ?? null;
-            if (!$page || isset($page['missing'])) break;
+            if (!$page || isset($page['missing']))
+                break;
 
             foreach (($page['links'] ?? []) as $link) {
                 if (isset($link['title'])) {
@@ -120,13 +163,13 @@ class WikipediaApiClient
 
         do {
             $params = [
-                'action'        => 'query',
-                'titles'        => $title,
-                'prop'          => 'linkshere',
-                'lhlimit'       => 'max',
-                'lhnamespace'   => 0,
-                'lhshow'        => '!redirect',
-                'format'        => 'json',
+                'action' => 'query',
+                'titles' => $title,
+                'prop' => 'linkshere',
+                'lhlimit' => 'max',
+                'lhnamespace' => 0,
+                'lhshow' => '!redirect',
+                'format' => 'json',
                 'formatversion' => 2,
             ];
             if ($lhcontinue !== null) {
@@ -134,12 +177,19 @@ class WikipediaApiClient
             }
 
             $response = $this->get($params);
-            if (!$response || !$response->ok()) break;
+            if (!$response || !$response->ok()) {
+                Log::warning('[WikipediaApiClient] getAllIncomingLinks partial failure', [
+                    'title' => $title,
+                    'collected_so_far' => count($allLinks),
+                ]);
+                break;
+            }
 
             $data = $response->json();
 
             $page = $data['query']['pages'][0] ?? null;
-            if (!$page || isset($page['missing'])) break;
+            if (!$page || isset($page['missing']))
+                break;
 
             foreach (($page['linkshere'] ?? []) as $link) {
                 if (isset($link['title'])) {
@@ -160,21 +210,23 @@ class WikipediaApiClient
      */
     public function getTouchedTimes(array $titles): array
     {
-        if (empty($titles)) return [];
+        if (empty($titles))
+            return [];
 
         $result = array_fill_keys($titles, null);
 
         // Wikipedia API は titles を | 区切りで複数指定できる(最大50件まで)
         foreach (array_chunk($titles, 50) as $chunk) {
             $response = $this->get([
-                'action'        => 'query',
-                'titles'        => implode('|', $chunk),
-                'prop'          => 'info',
-                'format'        => 'json',
+                'action' => 'query',
+                'titles' => implode('|', $chunk),
+                'prop' => 'info',
+                'format' => 'json',
                 'formatversion' => 2,
             ]);
 
-            if (!$response || !$response->ok()) continue;
+            if (!$response || !$response->ok())
+                continue;
 
             foreach (($response->json('query.pages', []) ?? []) as $page) {
                 if (isset($page['title'], $page['touched']) && !isset($page['missing'])) {
@@ -194,43 +246,77 @@ class WikipediaApiClient
     public function suggest(string $query, int $limit = 10): array
     {
         $response = $this->get([
-            'action'    => 'opensearch',
-            'search'    => $query,
-            'limit'     => $limit,
+            'action' => 'opensearch',
+            'search' => $query,
+            'limit' => $limit,
             'namespace' => 0,
-            'format'    => 'json',
+            'format' => 'json',
         ]);
 
-        if (!$response || !$response->ok()) return [];
+        if (!$response || !$response->ok())
+            return [];
 
-        $data   = $response->json();
+        $data = $response->json();
         $titles = $data[1] ?? [];
-        $urls   = $data[3] ?? [];
+        $urls = $data[3] ?? [];
 
         $suggestions = [];
         foreach ($titles as $i => $title) {
             $suggestions[] = [
                 'title' => $title,
-                'url'   => $urls[$i] ?? '',
+                'url' => $urls[$i] ?? '',
             ];
         }
         return $suggestions;
     }
 
-    /** 内部メソッド: 1リクエスト送信 */
+    /** 内部メソッド: 1リクエスト送信(失敗時は1回だけリトライ) */
     private function get(array $params): ?Response
     {
-        try {
-            $this->apiCalls++;
-            return Http::withHeaders(['User-Agent' => self::USER_AGENT])
-                ->timeout($this->timeout)
-                ->get($this->apiUrl, $params);
-        } catch (\Throwable $e) {
-            Log::warning('[WikipediaApiClient] HTTP error', [
-                'message' => $e->getMessage(),
-                'params'  => $params,
-            ]);
-            return null;
+        $maxAttempts = 2;
+        $lastException = null;
+
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            try {
+                $this->apiCalls++;
+                $response = Http::withHeaders(['User-Agent' => self::USER_AGENT])
+                    ->timeout($this->timeout)
+                    ->get($this->apiUrl, $params);
+
+                // HTTP的に成功 (2xx) ならそのまま返す
+                if ($response->ok()) {
+                    return $response;
+                }
+
+                // 5xx 系はリトライ価値あり、4xx は即諦め
+                if ($response->serverError() && $attempt < $maxAttempts) {
+                    Log::warning('[WikipediaApiClient] server error, retrying', [
+                        'status' => $response->status(),
+                        'attempt' => $attempt,
+                    ]);
+                    usleep(500_000); // 0.5秒待つ
+                    continue;
+                }
+
+                return $response; // 4xx などはそのまま返す(呼び出し側でハンドリング)
+
+            } catch (\Throwable $e) {
+                $lastException = $e;
+                if ($attempt < $maxAttempts) {
+                    Log::warning('[WikipediaApiClient] HTTP error, retrying', [
+                        'message' => $e->getMessage(),
+                        'attempt' => $attempt,
+                    ]);
+                    usleep(500_000);
+                    continue;
+                }
+            }
         }
+
+        Log::warning('[WikipediaApiClient] all attempts failed', [
+            'message' => $lastException?->getMessage(),
+            'params' => $params,
+        ]);
+        return null;
     }
 }

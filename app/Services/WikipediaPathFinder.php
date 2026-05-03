@@ -37,16 +37,19 @@ class WikipediaPathFinder
 
         // 深さの正規化(設定の min/max にクランプ)
         $default = (int) config('finder.default_max_depth_per_side', 3);
-        $min     = (int) config('finder.min_depth_per_side', 1);
-        $max     = (int) config('finder.max_depth_per_side', 5);
-        $depth   = $maxDepthPerSide ?? $default;
+        $min = (int) config('finder.min_depth_per_side', 1);
+        $max = (int) config('finder.max_depth_per_side', 5);
+        $depth = $maxDepthPerSide ?? $default;
         $this->maxDepthPerSide = max($min, min($max, $depth));
 
         // 依存性は内部で構築(本来はDI推奨だが、簡潔さ優先)
-        $this->api          = new WikipediaApiClient($lang);
-        $this->pageRepo     = new PageRepository();
+        $this->api = new WikipediaApiClient($lang);
+        $this->pageRepo = new PageRepository();
         $this->linkProvider = new LinkProvider(
-            $lang, $this->api, $this->pageRepo, new LinkRepository()
+            $lang,
+            $this->api,
+            $this->pageRepo,
+            new LinkRepository()
         );
     }
 
@@ -78,7 +81,7 @@ class WikipediaPathFinder
     {
         if ($this->onProgress) {
             ($this->onProgress)($event, $payload + [
-                'api_calls'     => $this->api->getApiCalls(),
+                'api_calls' => $this->api->getApiCalls(),
                 'visited_count' => $this->visitedCount,
             ]);
         }
@@ -91,6 +94,13 @@ class WikipediaPathFinder
     public static function parseUrl(string $url): ?array
     {
         $url = trim($url);
+
+        // 二重エンコードを検出して1段デコード
+        // %25E3 のような「% のエンコード」が含まれていたらデコードする
+        if (preg_match('/%25[0-9A-Fa-f]{2}/', $url)) {
+            $url = rawurldecode($url);
+        }
+
         if (!preg_match('~^https?://([a-z-]+)\.wikipedia\.org/wiki/([^?#\s]+)~u', $url, $m)) {
             return null;
         }
@@ -133,15 +143,15 @@ class WikipediaPathFinder
         if ($start === $goal) {
             $idMap = $this->pageRepo->ensurePages([$start]);
             return [
-                'path'     => [$start],
+                'path' => [$start],
                 'path_ids' => [$idMap[$start]],
-                'clicks'   => 0,
+                'clicks' => 0,
             ];
         }
 
         // 訪問済み: タイトル => 親(または子)タイトル
-        $fwdParents  = [$start => null];
-        $bwdChildren = [$goal  => null];
+        $fwdParents = [$start => null];
+        $bwdChildren = [$goal => null];
         $this->visitedCount = 2;
 
         $fwdFrontier = [$start];
@@ -151,28 +161,28 @@ class WikipediaPathFinder
 
         $this->emit('search_start', [
             'start' => $start,
-            'goal'  => $goal,
+            'goal' => $goal,
             'max_depth_per_side' => $this->maxDepthPerSide,
-            'max_depth_total'    => $this->maxDepthPerSide * 2,
+            'max_depth_total' => $this->maxDepthPerSide * 2,
         ]);
 
-        while ($fwdDepth < $this->maxDepthPerSide || $bwdDepth < $this->maxDepthPerSide) {
-            $expandForward = (count($fwdFrontier) <= count($bwdFrontier))
-                ? ($fwdDepth < $this->maxDepthPerSide)
-                : ($bwdDepth >= $this->maxDepthPerSide);
+        while (true) {
+            $side = $this->chooseSide($fwdFrontier, $bwdFrontier, $fwdDepth, $bwdDepth);
+            if ($side === null)
+                break;
 
-            if ($expandForward) {
+            if ($side === 'forward') {
                 $this->emit('layer_start', [
-                    'direction'     => 'forward',
-                    'depth'         => $fwdDepth + 1,
+                    'direction' => 'forward',
+                    'depth' => $fwdDepth + 1,
                     'frontier_size' => count($fwdFrontier),
-                    'total_depth'   => $fwdDepth + $bwdDepth + 1,
+                    'total_depth' => $fwdDepth + $bwdDepth + 1,
                 ]);
                 $meeting = $this->expandForward($fwdFrontier, $fwdParents, $bwdChildren);
                 $fwdDepth++;
                 $this->emit('layer_end', [
-                    'direction'         => 'forward',
-                    'depth'             => $fwdDepth,
+                    'direction' => 'forward',
+                    'depth' => $fwdDepth,
                     'new_frontier_size' => count($meeting['frontier']),
                 ]);
                 if ($meeting['found']) {
@@ -182,16 +192,16 @@ class WikipediaPathFinder
                 $fwdFrontier = $meeting['frontier'];
             } else {
                 $this->emit('layer_start', [
-                    'direction'     => 'backward',
-                    'depth'         => $bwdDepth + 1,
+                    'direction' => 'backward',
+                    'depth' => $bwdDepth + 1,
                     'frontier_size' => count($bwdFrontier),
-                    'total_depth'   => $fwdDepth + $bwdDepth + 1,
+                    'total_depth' => $fwdDepth + $bwdDepth + 1,
                 ]);
                 $meeting = $this->expandBackward($bwdFrontier, $bwdChildren, $fwdParents);
                 $bwdDepth++;
                 $this->emit('layer_end', [
-                    'direction'         => 'backward',
-                    'depth'             => $bwdDepth,
+                    'direction' => 'backward',
+                    'depth' => $bwdDepth,
                     'new_frontier_size' => count($meeting['frontier']),
                 ]);
                 if ($meeting['found']) {
@@ -200,15 +210,10 @@ class WikipediaPathFinder
                 }
                 $bwdFrontier = $meeting['frontier'];
             }
-
-            if (empty($fwdFrontier) && empty($bwdFrontier)) {
-                break;
-            }
         }
 
         return ['error' => '探索範囲内(最大' . ($this->maxDepthPerSide * 2) . 'クリック)では経路が見つかりませんでした。'];
     }
-
     /** forward方向に1階層展開 */
     private function expandForward(array $frontier, array &$fwdParents, array $bwdChildren): array
     {
@@ -219,7 +224,8 @@ class WikipediaPathFinder
 
         foreach ($linkMap as $source => $links) {
             foreach ($links as $link) {
-                if (array_key_exists($link, $fwdParents)) continue;
+                if (array_key_exists($link, $fwdParents))
+                    continue;
                 $fwdParents[$link] = $source;
                 $this->visitedCount++;
 
@@ -242,7 +248,8 @@ class WikipediaPathFinder
 
         foreach ($linkMap as $target => $incomingPages) {
             foreach ($incomingPages as $page) {
-                if (array_key_exists($page, $bwdChildren)) continue;
+                if (array_key_exists($page, $bwdChildren))
+                    continue;
                 $bwdChildren[$page] = $target;
                 $this->visitedCount++;
 
@@ -276,12 +283,33 @@ class WikipediaPathFinder
 
         // 経路上の全ページのIDを確保(履歴記録用)
         $idMap = $this->pageRepo->ensurePages($path);
-        $pathIds = array_map(fn ($t) => $idMap[$t] ?? null, $path);
+        $pathIds = array_map(fn($t) => $idMap[$t] ?? null, $path);
 
         return [
-            'path'     => $path,
+            'path' => $path,
             'path_ids' => $pathIds,
-            'clicks'   => count($path) - 1,
+            'clicks' => count($path) - 1,
         ];
+    }
+
+    /**
+     * 次に展開すべき方向を選ぶ。
+     * - 両方とも展開不可(空 or 深度上限)なら null(ループ終了)
+     * - 片方だけ展開可能ならそちら
+     * - 両方とも展開可能なら、フロンティアが小さい方
+     */
+    private function chooseSide(array $fwdFrontier, array $bwdFrontier, int $fwdDepth, int $bwdDepth): ?string
+    {
+        $fwdExhausted = empty($fwdFrontier) || $fwdDepth >= $this->maxDepthPerSide;
+        $bwdExhausted = empty($bwdFrontier) || $bwdDepth >= $this->maxDepthPerSide;
+
+        if ($fwdExhausted && $bwdExhausted)
+            return null;
+        if ($fwdExhausted)
+            return 'backward';
+        if ($bwdExhausted)
+            return 'forward';
+
+        return count($fwdFrontier) <= count($bwdFrontier) ? 'forward' : 'backward';
     }
 }

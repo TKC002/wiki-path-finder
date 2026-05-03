@@ -480,6 +480,77 @@
         .chip-remove:hover {
             background: rgba(255, 255, 255, 0.45);
         }
+
+        /* 深さスライダー */
+        .depth-control {
+            background: #f7fafc;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .depth-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+            color: #4a5568;
+            font-weight: 600;
+        }
+
+        .depth-value {
+            font-family: ui-monospace, "SF Mono", Consolas, monospace;
+            background: #5a67d8;
+            color: #fff;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+        }
+
+        .depth-slider {
+            width: 100%;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: #cbd5e0;
+            outline: none;
+            transition: background 0.2s;
+        }
+
+        .depth-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #5a67d8;
+            cursor: pointer;
+            border: 2px solid #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .depth-slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #5a67d8;
+            cursor: pointer;
+            border: 2px solid #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .depth-help {
+            font-size: 0.78rem;
+            color: #718096;
+            margin-top: 0.5rem;
+        }
+
+        .depth-help b {
+            color: #4a5568;
+        }
     </style>
 </head>
 
@@ -512,6 +583,19 @@
                         <div class="suggest-list" id="goal_suggest" hidden></div>
                     </div>
                 </div>
+                <div class="depth-control">
+                    <div class="depth-header">
+                        <span>🔍 探索の深さ(片側)</span>
+                        <span class="depth-value">
+                            <span id="depthValue">3</span> (最大 <span id="depthMax">6</span> クリック)
+                        </span>
+                    </div>
+                    <input type="range" id="depthSlider" class="depth-slider" min="1" max="5" step="1" value="3"
+                        name="depth">
+                    <div class="depth-help">
+                        値を大きくすると<b>より遠いペアでも経路が見つかる</b>ようになりますが、<b>探索時間が指数的に増えます</b>。
+                    </div>
+                </div>
                 <button type="submit" id="submitBtn">最短経路を探す</button>
             </form>
 
@@ -528,6 +612,9 @@
         const form = document.getElementById('pathForm');
         const resultDiv = document.getElementById('result');
         const submitBtn = document.getElementById('submitBtn');
+        const depthSlider = document.getElementById('depthSlider');
+        const depthValueEl = document.getElementById('depthValue');
+        const depthMaxEl = document.getElementById('depthMax');
         let currentSource = null;
         class Autocomplete {
             constructor(opts) {
@@ -701,6 +788,12 @@
             chip: document.getElementById('goal_chip'),
             hidden: document.getElementById('goal_url'),
         });
+        // 深さスライダーの動作
+        depthSlider.addEventListener('input', () => {
+            const v = parseInt(depthSlider.value, 10);
+            depthValueEl.textContent = v;
+            depthMaxEl.textContent = v * 2;
+        });
         function escapeRegex(s) {
             return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         }
@@ -738,9 +831,11 @@
             submitBtn.disabled = true;
             submitBtn.textContent = '探索中…';
 
+            const depth = parseInt(depthSlider.value, 10);
             const url = '{{ route("finder.stream") }}'
                 + '?start_url=' + encodeURIComponent(startUrl)
-                + '&goal_url=' + encodeURIComponent(goalUrl);
+                + '&goal_url=' + encodeURIComponent(goalUrl)
+                + '&depth=' + depth;
 
             const source = new EventSource(url);
             currentSource = source;
@@ -818,6 +913,47 @@
                 const d = JSON.parse(ev.data);
                 log(`探索開始: 「${d.start}」 ⇄ 「${d.goal}」(最大${d.max_depth_total}クリック)`);
             });
+            
+            source.addEventListener('cache_classify', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                const fresh = d.fresh, check = d.check, stale = d.stale, missing = d.missing;
+                const total = fresh + check + stale + missing;
+                if (total > 0) {
+                    log(`📦 キャッシュ判定: 新鮮${fresh} / 確認${check} / 古い${stale} / 未取得${missing}`, 'fwd');
+                }
+                updateCounters(d);
+            });
+
+            source.addEventListener('cache_check_touched', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`🔍 Wikipedia最終更新を確認中(${d.count}件)`, 'fwd');
+                updateCounters(d);
+            });
+
+            source.addEventListener('fetching_links', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`🌐 リンク取得開始(${d.count}ページ)`, 'fwd');
+                updateCounters(d);
+            });
+
+            source.addEventListener('fetching_progress', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                if (d.current === 1 || d.current === d.total || d.current % 5 === 0) {
+                    log(`  ↳ ${d.current}/${d.total}: ${d.title}`, 'fwd');
+                }
+                updateCounters(d);
+            });
+
+            source.addEventListener('fetching_incoming', (ev) => {
+                touch();
+                const d = JSON.parse(ev.data);
+                log(`🔄 入リンク取得中(${d.count}ページ)`, 'bwd');
+                updateCounters(d);
+            });
 
             source.addEventListener('layer_start', (ev) => {
                 touch();
@@ -875,10 +1011,16 @@
             });
 
             source.onerror = () => {
-                if (source.readyState === EventSource.CLOSED) {
-                    stopTimer();           // ★ 接続切れでも停止
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = '最短経路を探す';
+                // 接続エラー時は自動再接続させずに即終了
+                source.close();
+                currentSource = null;
+                stopTimer();
+                submitBtn.disabled = false;
+                submitBtn.textContent = '最短経路を探す';
+
+                // 結果欄に何もない場合(初回エラー)はメッセージを出す
+                if (!document.querySelector('.error') && !document.querySelector('.success-banner')) {
+                    renderError('サーバーとの接続が切断されました。再度お試しください。');
                 }
             };
         });

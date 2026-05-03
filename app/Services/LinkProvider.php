@@ -229,11 +229,18 @@ class LinkProvider
             $linkTitles  = $this->api->getAllOutgoingLinks($title);
             $linkTitles  = array_values(array_unique($linkTitles));
 
-            // リンク先ページのIDも確保(なければ作る)
-            $targetIdMap = empty($linkTitles)
-                ? []
-                : $this->pageRepo->ensurePages($linkTitles);
+            // ★ 空応答ガード: API が 0件返した場合は DB を書き換えない
+            //   (一時的なAPI障害で過去の正しいデータを破壊しないため)
+            if (empty($linkTitles)) {
+                \Log::warning('[LinkProvider] empty result from API, skipping save', [
+                    'title' => $title,
+                ]);
+                $this->emit('empty_response', ['title' => $title]);
+                continue;
+            }
 
+            // リンク先ページのIDも確保(なければ作る)
+            $targetIdMap = $this->pageRepo->ensurePages($linkTitles);
             $targetIds = array_values($targetIdMap);
 
             // links テーブルを置き換え
