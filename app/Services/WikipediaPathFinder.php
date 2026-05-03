@@ -2,49 +2,91 @@
 
 namespace App\Services;
 
+use App\Repositories\LinkRepository;
+use App\Repositories\PageRepository;
 use Closure;
-use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
+/**
+ * Wikipedia 双方向BFS探索エンジン。
+ *
+ * リンク取得は LinkProvider に委譲することで、本クラスは
+ * 純粋にBFSアルゴリズムだけに集中する。
+ */
 class WikipediaPathFinder
 {
-    private const MAX_DEPTH_PER_SIDE = 3;
-    private const MAX_FRONTIER       = 200;
-    private const POOL_SIZE          = 20;
-    private const TIMEOUT            = 15;
+    private const POOL_SIZE = 20;
 
     private string $lang;
-    private string $apiUrl;
+    private int $maxDepthPerSide;
 
-    /** 進捗通知用のコールバック ($event, array $payload) */
+    private WikipediaApiClient $api;
+    private LinkProvider $linkProvider;
+    private PageRepository $pageRepo;
+
+    /** 進捗通知用のコールバック */
     private ?Closure $onProgress = null;
 
-    /** 累計APIリクエスト回数 */
-    private int $apiCalls = 0;
-    /** 累計探索ノード数(訪問済みに加わった数) */
+    /** 累計探索ノード数 */
     private int $visitedCount = 0;
 
-    public function __construct(string $lang = 'ja')
-    {
-        $this->lang   = $lang;
-        $this->apiUrl = "https://{$lang}.wikipedia.org/w/api.php";
+    public function __construct(
+        string $lang,
+        ?int $maxDepthPerSide = null
+    ) {
+        $this->lang = $lang;
+
+        // 深さの正規化(設定の min/max にクランプ)
+        $default = (int) config('finder.default_max_depth_per_side', 3);
+        $min     = (int) config('finder.min_depth_per_side', 1);
+        $max     = (int) config('finder.max_depth_per_side', 5);
+        $depth   = $maxDepthPerSide ?? $default;
+        $this->maxDepthPerSide = max($min, min($max, $depth));
+
+        // 依存性は内部で構築(本来はDI推奨だが、簡潔さ優先)
+        $this->api          = new WikipediaApiClient($lang);
+        $this->pageRepo     = new PageRepository();
+        $this->linkProvider = new LinkProvider(
+            $lang, $this->api, $this->pageRepo, new LinkRepository()
+        );
     }
 
     public function setProgressCallback(Closure $cb): void
     {
         $this->onProgress = $cb;
+        // LinkProvider にもパイプスルー(キャッシュ判定の進捗が見える)
+        $this->linkProvider->setProgressCallback(function (string $e, array $p) {
+            $this->emit($e, $p);
+        });
+    }
+
+    public function getMaxDepthPerSide(): int
+    {
+        return $this->maxDepthPerSide;
+    }
+
+    public function getApiCalls(): int
+    {
+        return $this->api->getApiCalls();
+    }
+
+    public function getVisitedCount(): int
+    {
+        return $this->visitedCount;
     }
 
     private function emit(string $event, array $payload = []): void
     {
         if ($this->onProgress) {
             ($this->onProgress)($event, $payload + [
-                'api_calls'     => $this->apiCalls,
+                'api_calls'     => $this->api->getApiCalls(),
                 'visited_count' => $this->visitedCount,
             ]);
         }
     }
+
+    // -----------------------------------------------------------
+    // ユーティリティ(URLパース)
+    // -----------------------------------------------------------
 
     public static function parseUrl(string $url): ?array
     {
@@ -63,50 +105,68 @@ class WikipediaPathFinder
         return "https://{$this->lang}.wikipedia.org/wiki/{$path}";
     }
 
+    // -----------------------------------------------------------
+    // 探索本体
+    // -----------------------------------------------------------
+
+    /**
+     * 双方向BFSで最短経路を探索。
+     *
+     * 戻り値:
+     *   成功時 ['path' => [title, ...], 'path_ids' => [id, ...], 'clicks' => N]
+     *   失敗時 ['error' => '...']
+     */
     public function findPath(string $startTitle, string $goalTitle): array
     {
         $this->emit('normalize', ['title' => $startTitle, 'role' => 'start']);
-        $start = $this->normalizeTitle($startTitle);
+        $start = $this->api->normalizeTitle($startTitle);
         if ($start === null) {
             return ['error' => "スタートページ「{$startTitle}」が見つかりません。"];
         }
 
         $this->emit('normalize', ['title' => $goalTitle, 'role' => 'goal']);
-        $goal = $this->normalizeTitle($goalTitle);
+        $goal = $this->api->normalizeTitle($goalTitle);
         if ($goal === null) {
             return ['error' => "ゴールページ「{$goalTitle}」が見つかりません。"];
         }
+
         if ($start === $goal) {
-            return ['path' => [$start], 'clicks' => 0];
+            $idMap = $this->pageRepo->ensurePages([$start]);
+            return [
+                'path'     => [$start],
+                'path_ids' => [$idMap[$start]],
+                'clicks'   => 0,
+            ];
         }
 
+        // 訪問済み: タイトル => 親(または子)タイトル
         $fwdParents  = [$start => null];
         $bwdChildren = [$goal  => null];
         $this->visitedCount = 2;
 
         $fwdFrontier = [$start];
         $bwdFrontier = [$goal];
-
         $fwdDepth = 0;
         $bwdDepth = 0;
 
         $this->emit('search_start', [
             'start' => $start,
             'goal'  => $goal,
-            'max_depth_total' => self::MAX_DEPTH_PER_SIDE * 2,
+            'max_depth_per_side' => $this->maxDepthPerSide,
+            'max_depth_total'    => $this->maxDepthPerSide * 2,
         ]);
 
-        while ($fwdDepth < self::MAX_DEPTH_PER_SIDE || $bwdDepth < self::MAX_DEPTH_PER_SIDE) {
+        while ($fwdDepth < $this->maxDepthPerSide || $bwdDepth < $this->maxDepthPerSide) {
             $expandForward = (count($fwdFrontier) <= count($bwdFrontier))
-                ? ($fwdDepth < self::MAX_DEPTH_PER_SIDE)
-                : ($bwdDepth >= self::MAX_DEPTH_PER_SIDE);
+                ? ($fwdDepth < $this->maxDepthPerSide)
+                : ($bwdDepth >= $this->maxDepthPerSide);
 
             if ($expandForward) {
                 $this->emit('layer_start', [
-                    'direction'      => 'forward',
-                    'depth'          => $fwdDepth + 1,
-                    'frontier_size'  => count($fwdFrontier),
-                    'total_depth'    => $fwdDepth + $bwdDepth + 1,
+                    'direction'     => 'forward',
+                    'depth'         => $fwdDepth + 1,
+                    'frontier_size' => count($fwdFrontier),
+                    'total_depth'   => $fwdDepth + $bwdDepth + 1,
                 ]);
                 $meeting = $this->expandForward($fwdFrontier, $fwdParents, $bwdChildren);
                 $fwdDepth++;
@@ -117,15 +177,15 @@ class WikipediaPathFinder
                 ]);
                 if ($meeting['found']) {
                     $this->emit('meeting', ['node' => $meeting['node']]);
-                    return $this->buildPath($fwdParents, $bwdChildren, $meeting['node']);
+                    return $this->buildResult($fwdParents, $bwdChildren, $meeting['node']);
                 }
                 $fwdFrontier = $meeting['frontier'];
             } else {
                 $this->emit('layer_start', [
-                    'direction'      => 'backward',
-                    'depth'          => $bwdDepth + 1,
-                    'frontier_size'  => count($bwdFrontier),
-                    'total_depth'    => $fwdDepth + $bwdDepth + 1,
+                    'direction'     => 'backward',
+                    'depth'         => $bwdDepth + 1,
+                    'frontier_size' => count($bwdFrontier),
+                    'total_depth'   => $fwdDepth + $bwdDepth + 1,
                 ]);
                 $meeting = $this->expandBackward($bwdFrontier, $bwdChildren, $fwdParents);
                 $bwdDepth++;
@@ -136,7 +196,7 @@ class WikipediaPathFinder
                 ]);
                 if ($meeting['found']) {
                     $this->emit('meeting', ['node' => $meeting['node']]);
-                    return $this->buildPath($fwdParents, $bwdChildren, $meeting['node']);
+                    return $this->buildResult($fwdParents, $bwdChildren, $meeting['node']);
                 }
                 $bwdFrontier = $meeting['frontier'];
             }
@@ -146,15 +206,18 @@ class WikipediaPathFinder
             }
         }
 
-        return ['error' => '探索範囲内(最大' . (self::MAX_DEPTH_PER_SIDE * 2) . 'クリック)では経路が見つかりませんでした。'];
+        return ['error' => '探索範囲内(最大' . ($this->maxDepthPerSide * 2) . 'クリック)では経路が見つかりませんでした。'];
     }
 
+    /** forward方向に1階層展開 */
     private function expandForward(array $frontier, array &$fwdParents, array $bwdChildren): array
     {
-        $frontier = array_slice(array_values(array_unique($frontier)), 0, self::MAX_FRONTIER);
+        $frontier = array_values(array_unique($frontier));
         $newFrontier = [];
 
-        foreach ($this->getOutgoingLinksBatch($frontier) as $source => $links) {
+        $linkMap = $this->linkProvider->getOutgoingLinks($frontier);
+
+        foreach ($linkMap as $source => $links) {
             foreach ($links as $link) {
                 if (array_key_exists($link, $fwdParents)) continue;
                 $fwdParents[$link] = $source;
@@ -169,12 +232,15 @@ class WikipediaPathFinder
         return ['found' => false, 'node' => null, 'frontier' => $newFrontier];
     }
 
+    /** backward方向に1階層展開 */
     private function expandBackward(array $frontier, array &$bwdChildren, array $fwdParents): array
     {
-        $frontier = array_slice(array_values(array_unique($frontier)), 0, self::MAX_FRONTIER);
+        $frontier = array_values(array_unique($frontier));
         $newFrontier = [];
 
-        foreach ($this->getIncomingLinksBatch($frontier) as $target => $incomingPages) {
+        $linkMap = $this->linkProvider->getIncomingLinks($frontier);
+
+        foreach ($linkMap as $target => $incomingPages) {
             foreach ($incomingPages as $page) {
                 if (array_key_exists($page, $bwdChildren)) continue;
                 $bwdChildren[$page] = $target;
@@ -189,98 +255,10 @@ class WikipediaPathFinder
         return ['found' => false, 'node' => null, 'frontier' => $newFrontier];
     }
 
-    private function getOutgoingLinksBatch(array $titles): array
-    {
-        return $this->batchRequest($titles, [
-            'prop'        => 'links',
-            'pllimit'     => 'max',
-            'plnamespace' => 0,
-        ], 'links', 'title');
-    }
-
-    private function getIncomingLinksBatch(array $titles): array
-    {
-        return $this->batchRequest($titles, [
-            'prop'        => 'linkshere',
-            'lhlimit'     => 'max',
-            'lhnamespace' => 0,
-            'lhshow'      => '!redirect',
-        ], 'linkshere', 'title');
-    }
-
-    private function batchRequest(array $titles, array $extraParams, string $propKey, string $itemKey): array
-    {
-        $results = array_fill_keys($titles, []);
-        $chunks  = array_chunk($titles, self::POOL_SIZE);
-
-        foreach ($chunks as $chunk) {
-            $responses = Http::pool(fn ($pool) => array_map(
-                fn ($title) => $pool
-                    ->withHeaders(['User-Agent' => 'WikiPathFinder/1.0 (Laravel demo)'])
-                    ->timeout(self::TIMEOUT)
-                    ->get($this->apiUrl, array_merge([
-                        'action'        => 'query',
-                        'titles'        => $title,
-                        'format'        => 'json',
-                        'formatversion' => 2,
-                    ], $extraParams)),
-                $chunk
-            ));
-
-            $this->apiCalls += count($chunk);
-
-            foreach ($chunk as $i => $title) {
-                $r = $responses[$i] ?? null;
-                if (!$r instanceof Response || !$r->ok()) continue;
-
-                $items = [];
-                foreach ($r->json('query.pages', []) as $page) {
-                    if (isset($page['missing'])) continue;
-                    foreach (($page[$propKey] ?? []) as $e) {
-                        if (isset($e[$itemKey])) {
-                            $items[] = $e[$itemKey];
-                        }
-                    }
-                }
-                $results[$title] = $items;
-            }
-
-            // チャンク完了ごとに進捗を出す
-            $this->emit('chunk_done', [
-                'chunk_size' => count($chunk),
-            ]);
-        }
-        return $results;
-    }
-
-    private function normalizeTitle(string $title): ?string
-    {
-        try {
-            $response = Http::withHeaders(['User-Agent' => 'WikiPathFinder/1.0 (Laravel demo)'])
-                ->timeout(self::TIMEOUT)
-                ->get($this->apiUrl, [
-                    'action'        => 'query',
-                    'titles'        => $title,
-                    'redirects'     => 1,
-                    'format'        => 'json',
-                    'formatversion' => 2,
-                ]);
-        } catch (\Throwable $e) {
-            Log::error('[finder] normalizeTitle HTTP error', ['title' => $title, 'message' => $e->getMessage()]);
-            throw $e;
-        }
-        $this->apiCalls++;
-
-        if (!$response->ok()) return null;
-
-        $page = $response->json('query.pages.0');
-        if (!$page || isset($page['missing']) || isset($page['invalid'])) return null;
-        if (($page['ns'] ?? null) !== 0) return null;
-
-        return $page['title'];
-    }
-
-    private function buildPath(array $fwdParents, array $bwdChildren, string $meetingNode): array
+    /**
+     * 出会い点から経路を構築し、結果を組み立てる(タイトル配列とID配列を両方返す)
+     */
+    private function buildResult(array $fwdParents, array $bwdChildren, string $meetingNode): array
     {
         $forward = [];
         $cur = $meetingNode;
@@ -295,6 +273,15 @@ class WikipediaPathFinder
             $cur = $bwdChildren[$cur] ?? null;
         }
         $path = array_merge($forward, $backward);
-        return ['path' => $path, 'clicks' => count($path) - 1];
+
+        // 経路上の全ページのIDを確保(履歴記録用)
+        $idMap = $this->pageRepo->ensurePages($path);
+        $pathIds = array_map(fn ($t) => $idMap[$t] ?? null, $path);
+
+        return [
+            'path'     => $path,
+            'path_ids' => $pathIds,
+            'clicks'   => count($path) - 1,
+        ];
     }
 }
