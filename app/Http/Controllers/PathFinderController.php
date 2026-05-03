@@ -164,4 +164,51 @@ class PathFinderController
             ], 500);
         }
     }
+    /** Wikipediaのタイトル候補を返す(OpenSearch APIをプロキシ) */
+    public function suggest(Request $request): JsonResponse
+    {
+        $q    = trim((string) $request->query('q', ''));
+        $lang = (string) $request->query('lang', 'ja');
+        if (!preg_match('/^[a-z-]{2,12}$/', $lang)) {
+            $lang = 'ja';
+        }
+        if ($q === '') {
+            return response()->json(['suggestions' => []]);
+        }
+
+        try {
+            $response = \Illuminate\Support\Facades\Http::withHeaders([
+                    'User-Agent' => 'WikiPathFinder/1.0 (Laravel demo)',
+                ])
+                ->timeout(5)
+                ->get("https://{$lang}.wikipedia.org/w/api.php", [
+                    'action'    => 'opensearch',
+                    'search'    => $q,
+                    'limit'     => 10,
+                    'namespace' => 0,
+                    'format'    => 'json',
+                ]);
+
+            if (!$response->ok()) {
+                return response()->json(['suggestions' => []]);
+            }
+
+            // OpenSearchの戻り値: [query, [titles...], [descs...], [urls...]]
+            $data   = $response->json();
+            $titles = $data[1] ?? [];
+            $urls   = $data[3] ?? [];
+
+            $suggestions = [];
+            foreach ($titles as $i => $title) {
+                $suggestions[] = [
+                    'title' => $title,
+                    'url'   => $urls[$i] ?? '',
+                ];
+            }
+            return response()->json(['suggestions' => $suggestions]);
+        } catch (\Throwable $e) {
+            Log::warning('[finder] suggest failed', ['message' => $e->getMessage(), 'q' => $q]);
+            return response()->json(['suggestions' => []]);
+        }
+    }
 }
