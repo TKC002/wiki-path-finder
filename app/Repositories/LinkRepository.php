@@ -46,7 +46,7 @@ class LinkRepository
     }
 
     /**
-     * あるページの全リンクを置き換える(古いものを削除して新しいものを挿入)
+     * あるページの全 outgoing リンクを置き換える(古いものを削除して新しいものを挿入)
      * トランザクション内で実行される
      */
     public function replaceOutgoingLinks(int $sourceId, array $targetIds): void
@@ -66,6 +66,25 @@ class LinkRepository
                 Link::insertOrIgnore($chunk);
             }
         });
+    }
+
+    /**
+     * あるページへの incoming リンクを追加する(既存は削除しない)。
+     *
+     * forward 側が先に保存した (source, target) レコードを壊さないように、
+     * insertOrIgnore で追加のみ行う。BFS的にはリンクが多い分には問題ない。
+     */
+    public function addIncomingLinks(int $targetId, array $sourceIds): void
+    {
+        if (empty($sourceIds)) return;
+
+        $rows = array_map(
+            fn ($sid) => ['source_id' => $sid, 'target_id' => $targetId],
+            array_values(array_unique($sourceIds))
+        );
+        foreach (array_chunk($rows, 1000) as $chunk) {
+            Link::insertOrIgnore($chunk);
+        }
     }
 
     /** あるページから出ている全リンクを削除 */

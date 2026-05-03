@@ -63,6 +63,10 @@ class PageRepository
             ->all();
     }
 
+    // -----------------------------------------------------------
+    // Outgoing (forward) 鮮度判定
+    // -----------------------------------------------------------
+
     /**
      * 指定ページIDのキャッシュ鮮度を判定する。
      *
@@ -137,5 +141,54 @@ class PageRepository
         PageMeta::where('page_id', $pageId)->update([
             'fetched_at' => Carbon::now(),
         ]);
+    }
+
+    // -----------------------------------------------------------
+    // Incoming (backward) 鮮度判定
+    // -----------------------------------------------------------
+
+    /**
+     * Incoming リンクの鮮度を一括判定 (id => freshness)
+     *
+     * Outgoing と違い、ターゲットページの touched_at では
+     * incoming リンクの変化を検知できない(他ページの変更で変わるため)。
+     * そのため 'check' は使わず 'fresh' / 'stale' / 'missing' の3段階。
+     */
+    public function getIncomingFreshnessMap(array $pageIds): array
+    {
+        if (empty($pageIds)) return [];
+
+        $metas = PageMeta::whereIn('page_id', $pageIds)->get()->keyBy('page_id');
+
+        $freshTtl = config('finder.fresh_ttl_hours', 24);
+        $now      = Carbon::now();
+
+        $result = [];
+        foreach ($pageIds as $id) {
+            $meta = $metas->get($id);
+            if (!$meta || $meta->incoming_fetched_at === null) {
+                $result[$id] = 'missing';
+                continue;
+            }
+            $hoursOld = $meta->incoming_fetched_at->diffInHours($now);
+            if ($hoursOld < $freshTtl) {
+                $result[$id] = 'fresh';
+            } else {
+                $result[$id] = 'stale';
+            }
+        }
+        return $result;
+    }
+
+    /** Incoming メタ情報を更新 */
+    public function upsertIncomingMeta(int $pageId, int $incomingLinkCount): void
+    {
+        PageMeta::updateOrCreate(
+            ['page_id' => $pageId],
+            [
+                'incoming_fetched_at'  => Carbon::now(),
+                'incoming_link_count'  => $incomingLinkCount,
+            ]
+        );
     }
 }

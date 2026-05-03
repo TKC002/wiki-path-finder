@@ -52,27 +52,18 @@ class LinkProvider
      */
     public function getOutgoingLinks(array $titles): array
     {
-        return $this->getLinks($titles, /* outgoing */ true);
+        return $this->getLinks($titles, 'outgoing');
     }
 
     /**
-     * 複数ページの「入ってくるリンク元タイトル」を取得する
+     * 複数ページの「入ってくるリンク元タイトル」を取得する(キャッシュ判定込み)
      *
-     * 注意: linkshere は変化が大きく、巨大ページで取得コストも巨大なので、
-     * 現時点ではキャッシュせず常に Wikipedia API から取得する。
+     * @param string[] $titles  ターゲットページのタイトル配列
+     * @return array  title => [source_title, ...] の連想配列
      */
     public function getIncomingLinks(array $titles): array
     {
-        if (empty($titles)) return [];
-
-        $result = array_fill_keys($titles, []);
-        $this->emit('fetching_incoming', ['count' => count($titles)]);
-
-        foreach ($titles as $title) {
-            $result[$title] = $this->api->getAllIncomingLinks($title);
-        }
-
-        return $result;
+        return $this->getLinks($titles, 'incoming');
     }
 
     // -----------------------------------------------------------
@@ -80,9 +71,11 @@ class LinkProvider
     // -----------------------------------------------------------
 
     /**
-     * 複数ページのリンクを取得する本体(現状は outgoing のみキャッシュする)
+     * 複数ページのリンクを取得する本体。
+     *
+     * @param string $direction 'outgoing' | 'incoming'
      */
-    private function getLinks(array $titles, bool $outgoing): array
+    private function getLinks(array $titles, string $direction): array
     {
         if (empty($titles)) return [];
 
@@ -93,7 +86,9 @@ class LinkProvider
 
         // 2. 鮮度判定
         $pageIds = array_values($idMap);
-        $freshnessMap = $this->pageRepo->getFreshnessMap($pageIds);  // id => freshness
+        $freshnessMap = $direction === 'outgoing'
+            ? $this->pageRepo->getFreshnessMap($pageIds)
+            : $this->pageRepo->getIncomingFreshnessMap($pageIds);
 
         // 3. 分類
         $classified = $this->classifyByFreshness($idMap, $freshnessMap);
@@ -105,49 +100,60 @@ class LinkProvider
             'missing' => count($classified['missing']),
         ]);
 
-        // 4. 'check' グループは touched で確認、結果に応じて再分類
+        // 4. 'check' グループの処理
         if (!empty($classified['check'])) {
-            $this->verifyAndRedistribute($classified);
+            if ($direction === 'outgoing') {
+                // outgoing: touched で変更確認 → fresh or stale に再分類
+                $this->verifyAndRedistribute($classified);
+            } else {
+                // incoming: touched では判定できないので一律 stale 扱い
+                $classified['stale'] = array_merge($classified['stale'], $classified['check']);
+                $classified['check'] = [];
+            }
         }
 
-        // 5. APIから取得すべきもの = stale + missing(verifyの結果staleに移ったもの含む)
+        // 5. APIから取得すべきもの = stale + missing
         $needFetch = array_merge($classified['stale'], $classified['missing']);
 
         if (!empty($needFetch)) {
-            $this->fetchAndStoreOutgoing($needFetch);
+            if ($direction === 'outgoing') {
+                $this->fetchAndStoreOutgoing($needFetch);
+            } else {
+                $this->fetchAndStoreIncoming($needFetch);
+            }
         }
 
-        // 6. 全ページのIDが確定したので、DBから一括でリンクを取得
-        //    (ここで stale だったページのリンクは既に新しくなっている)
+        // 6. DBから一括でリンクを取得
         $allIds = array_values($idMap);
-        $linkIdsByPageId = $this->linkRepo->getOutgoingTargetIds($allIds);
+        if ($direction === 'outgoing') {
+            $linkIdsByPageId = $this->linkRepo->getOutgoingTargetIds($allIds);
+        } else {
+            $linkIdsByPageId = $this->linkRepo->getIncomingSourceIds($allIds);
+        }
 
         // 7. ID → タイトル変換
-        // 全ターゲットIDを集めて1クエリで解決
-        $allTargetIds = [];
-        foreach ($linkIdsByPageId as $targetIds) {
-            foreach ($targetIds as $tid) $allTargetIds[$tid] = true;
+        $allLinkedIds = [];
+        foreach ($linkIdsByPageId as $linkedIds) {
+            foreach ($linkedIds as $lid) $allLinkedIds[$lid] = true;
         }
-        $titleMap = $this->pageRepo->getTitleMap(array_keys($allTargetIds));
+        $titleMap = $this->pageRepo->getTitleMap(array_keys($allLinkedIds));
 
-        // 8. 結果を組み立てる: source title => [target title, ...]
+        // 8. 結果を組み立てる: title => [linked_title, ...]
         $result = [];
         foreach ($idMap as $title => $id) {
-            $targetTitles = [];
-            foreach ($linkIdsByPageId[$id] ?? [] as $tid) {
-                if (isset($titleMap[$tid])) {
-                    $targetTitles[] = $titleMap[$tid];
+            $linkedTitles = [];
+            foreach ($linkIdsByPageId[$id] ?? [] as $lid) {
+                if (isset($titleMap[$lid])) {
+                    $linkedTitles[] = $titleMap[$lid];
                 }
             }
-            $result[$title] = $targetTitles;
+            $result[$title] = $linkedTitles;
         }
         return $result;
     }
 
     /**
      * 鮮度ごとに [title => id] を分類
-     * 戻り値: ['fresh' => [...], 'check' => [...], 'stale' => [...], 'missing' => [...]]
-     * 各値も title => id の連想配列
      */
     private function classifyByFreshness(array $idMap, array $freshnessMap): array
     {
@@ -175,15 +181,12 @@ class LinkProvider
             $newTouched = $touchedMap[$title] ?? null;
             $oldTouched = \App\Models\PageMeta::where('page_id', $id)->value('wiki_touched_at');
 
-            // 比較: Carbon が同じか or DB側が新しい
             $changed = false;
             if ($newTouched === null) {
-                // touched取れなかったら念のため再取得扱い
                 $changed = true;
             } elseif ($oldTouched === null) {
                 $changed = true;
             } else {
-                // Carbon と DateTime/string の混在に注意
                 $oldCarbon = \Carbon\Carbon::parse($oldTouched);
                 $changed = $newTouched->gt($oldCarbon);
             }
@@ -191,19 +194,15 @@ class LinkProvider
             if ($changed) {
                 $classified['stale'][$title] = $id;
             } else {
-                // 不変だったので fetched_at だけ更新して fresh 扱い
                 $this->pageRepo->refreshFetchedAt($id);
                 $classified['fresh'][$title] = $id;
             }
         }
-        // 元のcheckはクリア
         $classified['check'] = [];
     }
 
     /**
-     * 指定ページの全リンクを Wikipedia から取得して DB に保存する
-     *
-     * @param array $titleIdMap  title => id の連想配列(取得対象)
+     * Outgoing リンクを Wikipedia から取得して DB に保存する
      */
     private function fetchAndStoreOutgoing(array $titleIdMap): void
     {
@@ -213,7 +212,6 @@ class LinkProvider
 
         $this->emit('fetching_links', ['count' => $total]);
 
-        // touched時刻も同時に取りたい(再取得時のwiki_touched_at記録のため)
         $touchedMap = $this->api->getTouchedTimes($titles);
 
         $i = 0;
@@ -230,28 +228,72 @@ class LinkProvider
             $linkTitles  = array_values(array_unique($linkTitles));
 
             // ★ 空応答ガード: API が 0件返した場合は DB を書き換えない
-            //   (一時的なAPI障害で過去の正しいデータを破壊しないため)
             if (empty($linkTitles)) {
-                \Log::warning('[LinkProvider] empty result from API, skipping save', [
+                \Log::warning('[LinkProvider] empty outgoing result from API, skipping save', [
                     'title' => $title,
                 ]);
                 $this->emit('empty_response', ['title' => $title]);
                 continue;
             }
 
-            // リンク先ページのIDも確保(なければ作る)
             $targetIdMap = $this->pageRepo->ensurePages($linkTitles);
             $targetIds = array_values($targetIdMap);
 
-            // links テーブルを置き換え
             $this->linkRepo->replaceOutgoingLinks($sourceId, $targetIds);
 
-            // page_meta を更新
             $this->pageRepo->upsertMeta(
                 $sourceId,
                 $touchedMap[$title] ?? null,
                 count($targetIds)
             );
+        }
+    }
+
+    /**
+     * Incoming リンクを Wikipedia から取得して DB に保存する
+     *
+     * Outgoing と違い、既存レコードを削除せず追加のみ行う(insertOrIgnore)。
+     * これにより forward 側が先に保存したリンクを壊さない。
+     */
+    private function fetchAndStoreIncoming(array $titleIdMap): void
+    {
+        $titles = array_keys($titleIdMap);
+        $total  = count($titles);
+        if ($total === 0) return;
+
+        $this->emit('fetching_incoming', ['count' => $total]);
+
+        $i = 0;
+        foreach ($titles as $title) {
+            $i++;
+            $this->emit('fetching_progress', [
+                'current' => $i,
+                'total'   => $total,
+                'title'   => $title,
+            ]);
+
+            $targetId   = $titleIdMap[$title];
+            $linkTitles = $this->api->getAllIncomingLinks($title);
+            $linkTitles = array_values(array_unique($linkTitles));
+
+            // ★ 空応答ガード
+            if (empty($linkTitles)) {
+                \Log::warning('[LinkProvider] empty incoming result from API, skipping save', [
+                    'title' => $title,
+                ]);
+                $this->emit('empty_response', ['title' => $title]);
+                continue;
+            }
+
+            // リンク元ページのIDを確保
+            $sourceIdMap = $this->pageRepo->ensurePages($linkTitles);
+            $sourceIds = array_values($sourceIdMap);
+
+            // 追加のみ(既存は壊さない)
+            $this->linkRepo->addIncomingLinks($targetId, $sourceIds);
+
+            // incoming メタを更新
+            $this->pageRepo->upsertIncomingMeta($targetId, count($sourceIds));
         }
     }
 }

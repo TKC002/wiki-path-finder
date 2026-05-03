@@ -14,12 +14,15 @@ class PageMeta extends Model
 
     protected $fillable = [
         'page_id', 'wiki_touched_at', 'fetched_at', 'link_count',
+        'incoming_fetched_at', 'incoming_link_count',
     ];
 
     protected $casts = [
-        'wiki_touched_at' => 'datetime',
-        'fetched_at'      => 'datetime',
-        'link_count'      => 'integer',
+        'wiki_touched_at'      => 'datetime',
+        'fetched_at'           => 'datetime',
+        'link_count'           => 'integer',
+        'incoming_fetched_at'  => 'datetime',
+        'incoming_link_count'  => 'integer',
     ];
 
     public function page(): BelongsTo
