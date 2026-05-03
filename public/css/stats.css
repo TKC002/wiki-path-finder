@@ -1,0 +1,63 @@
+/* public/css/stats.css - 統計ページ専用 */
+
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+.stat-card {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff;
+    padding: 1rem;
+    border-radius: 10px;
+    text-align: center;
+}
+.stat-card .num {
+    font-size: 1.8rem;
+    font-weight: 800;
+    display: block;
+    text-align: center;
+}
+.stat-card .label {
+    font-size: 0.78rem;
+    opacity: 0.9;
+}
+
+/* 棒グラフ(クリック数分布) */
+.bar-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0;
+}
+.bar-row .bar-label {
+    min-width: 80px;
+    font-weight: 600;
+    color: #4a5568;
+    font-size: 0.85rem;
+}
+.bar-row .bar {
+    flex: 1;
+    height: 24px;
+    background: #edf2f7;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+}
+.bar-row .bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea, #764ba2);
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 8px;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 700;
+    min-width: 30px;
+    transition: width 0.3s;
+}
+.bar-row .bar-fill.zero {
+    background: #cbd5e0;
+}
