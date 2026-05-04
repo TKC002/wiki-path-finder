@@ -285,8 +285,10 @@ public function stream(Request $request): StreamedResponse
         $result = $finder->findPath($start['title'], $goal['title']);
         // ...
     }, 200, [
-        'Content-Type' => 'text/event-stream; charset=UTF-8',
-        'Cache-Control' => 'no-cache, no-transform',
+        'Content-Type'      => 'text/event-stream; charset=UTF-8',
+        'Cache-Control'     => 'no-cache, no-transform',
+        'X-Accel-Buffering' => 'no',         // Nginx のバッファリングを無効化
+        'Connection'        => 'keep-alive',
     ]);
 }
 ```
@@ -294,7 +296,7 @@ public function stream(Request $request): StreamedResponse
 **通常のコントローラとの違い:**
 
 - `View` ではなく `StreamedResponse` を返す
-- レスポンスヘッダを明示的に指定
+- レスポンスヘッダを明示的に指定（`X-Accel-Buffering: no` でNginxのバッファリングも無効化）
 - コールバック内でリアルタイムにデータを出力
 
 ---
@@ -654,8 +656,14 @@ class WikipediaApiClient
     // 出ていくリンクの全取得（ページネーション対応）
     public function getAllOutgoingLinks(string $title): array { ... }
 
+    // 出ていくリンクの一括取得（バッチ版、10件ずつ）
+    public function getBatchOutgoingLinks(array $titles): array { ... }
+
     // 入ってくるリンクの全取得
     public function getAllIncomingLinks(string $title): array { ... }
+
+    // 入ってくるリンクの一括取得（バッチ版、10件ずつ）
+    public function getBatchIncomingLinks(array $titles): array { ... }
 
     // 最終更新日時の一括取得（キャッシュ鮮度判定用）
     public function getTouchedTimes(array $titles): array { ... }
@@ -665,22 +673,29 @@ class WikipediaApiClient
 }
 ```
 
-**設計のポイント**: リトライロジック（最大2回、500msウェイト）が内部に閉じ込められている。呼び出し側はリトライを意識しない。
+**設計のポイント**: アダプティブスロットリング（1〜5秒の間隔調整）とリトライロジック（最大4回、429レートリミット対応含む）が内部に閉じ込められている。呼び出し側はリトライやレート制限を意識しない。
 
 #### `LinkProvider.php` — キャッシュ層
 
-**責務**: 「DBにキャッシュがあるか？」「鮮度は？」「APIから取り直すべきか？」を判断し、適切なリンクデータを返す。
+**責務**: 「DBにキャッシュがあるか？」「鮮度は？」「APIから取り直すべきか？」を判断し、適切なリンクデータを返す。outgoing/incoming両方向のキャッシュを管理する。
 
 ```
 [PathFinder] → getOutgoingLinks(["日本", "東京"])
+               getIncomingLinks(["ヘミングウェイ"])
                     │
               [LinkProvider]
-                    ├── PageRepository で鮮度判定
-                    ├── fresh → DBから読む
-                    ├── check → Wikipedia APIでtouched確認
-                    │           └── 変更なし → fresh扱い
-                    │           └── 変更あり → stale扱い
-                    └── stale/missing → APIから取得してDBに保存
+                    ├── PageRepository で鮮度判定(方向別)
+                    │
+                    ├── outgoing の場合:
+                    │   ├── fresh → DBから読む
+                    │   ├── check → Wikipedia APIでtouched確認
+                    │   │           └── 変更なし → fresh扱い
+                    │   │           └── 変更あり → 再取得
+                    │   └── missing → APIから取得してDBに保存
+                    │
+                    └── incoming の場合:
+                        ├── fresh → DBから読む
+                        └── missing → APIから取得してDBに追加(既存は削除しない)
 ```
 
 ---

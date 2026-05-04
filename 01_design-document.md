@@ -24,7 +24,7 @@
 2. **オートコンプリート** — Wikipedia OpenSearch APIを利用したページ名の補完
 3. **探索履歴** — 過去の探索結果の一覧・詳細表示（フィルタ・ページネーション付き）
 4. **統計ダッシュボード** — クリック数分布、ハブページ、人気ペアなどの集計
-5. **リンクキャッシュ** — Wikipedia APIから取得したリンク情報をDBにキャッシュし、再探索を高速化
+5. **リンクキャッシュ** — Wikipedia APIから取得したリンク情報（出ていくリンク・入ってくるリンクの両方向）をDBにキャッシュし、再探索を高速化
 
 ---
 
@@ -112,6 +112,7 @@ pages (1) ──── (N) links (N) ──── (1) pages
 
 - 複合主キー `(source_id, target_id)`
 - `target_id` にもインデックス（逆方向探索用）
+- 前方探索（outgoing）と後方探索（incoming）の両方のリンクを同じテーブルに格納
 
 #### `page_meta` — リンクキャッシュのメタ情報
 
@@ -119,8 +120,13 @@ pages (1) ──── (N) links (N) ──── (1) pages
 |-------|-----|------|
 | page_id | UNSIGNED INT (PK, FK→pages) | 対象ページ |
 | wiki_touched_at | DATETIME NULL | Wikipedia側の最終更新日時 |
-| fetched_at | DATETIME | 最後にリンクを取得した日時 |
-| link_count | UNSIGNED INT | 取得したリンク数 |
+| fetched_at | DATETIME | 最後に**出ていくリンク**を取得した日時 |
+| link_count | UNSIGNED INT | 取得した出ていくリンク数 |
+| incoming_fetched_at | DATETIME NULL | 最後に**入ってくるリンク**を取得した日時 |
+| incoming_link_count | UNSIGNED INT DEFAULT 0 | 取得した入ってくるリンク数 |
+
+- `fetched_at` にインデックス（outgoing鮮度判定用）
+- `incoming_fetched_at` にインデックス（incoming鮮度判定用）
 
 #### `search_history` — 探索実行の記録
 
@@ -147,16 +153,24 @@ pages (1) ──── (N) links (N) ──── (1) pages
 
 ### 3.3 キャッシュ戦略（鮮度判定）
 
-リンクデータの鮮度を3段階で判定する：
+リンクデータの鮮度を判定し、APIリクエスト数を抑えつつ情報の鮮度を維持する。出ていくリンク（outgoing）と入ってくるリンク（incoming）で判定ロジックが異なる。
+
+#### Outgoing（前方）リンクの鮮度
 
 | 鮮度 | 条件 | 動作 |
 |------|------|------|
-| `fresh` | fetched_at から24時間以内 | DBのリンクをそのまま使用 |
-| `check` | 24時間〜7日 | Wikipedia APIで`touched`を確認し、変更がなければfresh扱い |
-| `stale` | 7日超 | Wikipedia APIからリンクを再取得 |
-| `missing` | page_metaに行がない | 初回取得として扱う |
+| `fresh` | `fetched_at` から24時間以内 | DBのリンクをそのまま使用 |
+| `check` | 24時間超、または `link_count` が0 | Wikipedia APIで`touched`を確認し、変更がなければfresh扱い、変更があれば再取得 |
+| `missing` | `page_meta` に行がない | 初回取得として扱う |
 
-この戦略により、APIリクエスト数を抑えつつ、リンク情報の鮮度を維持する。
+#### Incoming（後方）リンクの鮮度
+
+Incomingリンクはターゲットページの `touched_at` では変化を検知できない（他のページの編集で変わるため）。そのため `check` は使わず、`fresh` / `missing` の2段階で判定する。
+
+| 鮮度 | 条件 | 動作 |
+|------|------|------|
+| `fresh` | `incoming_fetched_at` から24時間以内 かつ `incoming_link_count > 0` | DBのリンクをそのまま使用 |
+| `missing` | それ以外（行なし、null、0件、24時間超） | APIから再取得 |
 
 ---
 
@@ -172,9 +186,10 @@ pages (1) ──── (N) links (N) ──── (1) pages
 
 #### 方向の選択ロジック (`chooseSide`)
 
-1. 両方の探索が終了（フロンティア空 or 深さ上限到達）→ 終了
-2. 片方だけ終了 → もう片方を展開
-3. 両方とも展開可能 → **フロンティアが小さい方**を選択（探索空間を抑制）
+1. **いずれかのフロンティアが空** → 経路なし（グラフが断絶）として即終了
+2. 両方の深さが上限到達 → 終了
+3. 片方だけ深さ上限 → もう片方を展開
+4. 両方とも展開可能 → **フロンティアが小さい方**を選択（探索空間を抑制）
 
 #### 前方展開 (`expandForward`)
 
@@ -186,12 +201,20 @@ pages (1) ──── (N) links (N) ──── (1) pages
 - フロンティアの各ページについて、**入ってくるリンク（linkshere）**を取得
 - 新しいページが前方の訪問済みに含まれていれば → **出会い！**
 
-### 4.2 リンク取得の非対称性
+#### 空フロンティアのリトライ
 
-| 方向 | API | キャッシュ | 理由 |
-|------|-----|----------|------|
-| 前方（outgoing） | `prop=links` | **あり**（DBに保存） | 1ページあたりのリンク数が有限で安定 |
-| 後方（incoming） | `prop=linkshere` | **なし**（常にAPI） | 被リンク数は変動が大きく、巨大ページでは膨大 |
+展開後にフロンティアが空になった場合、API失敗の可能性があるため最大2回リトライする。リトライでもフロンティアが空なら、グラフ断絶として探索を終了する。
+
+### 4.2 リンク取得とキャッシュ
+
+| 方向 | API | キャッシュ | キャッシュ方式 |
+|------|-----|----------|-------------|
+| 前方（outgoing） | `prop=links` | **あり** | 全リンクをDB保存、touched比較で鮮度判定 |
+| 後方（incoming） | `prop=linkshere` | **あり** | DB保存（追加のみ、既存は削除しない）、24h TTLで鮮度判定 |
+
+- Outgoing: `replaceOutgoingLinks()`でリンクを全置換（正確性重視）
+- Incoming: `addIncomingLinks()`で`insertOrIgnore`による追加のみ（前方探索が保存したリンクを壊さない）
+- バッチAPI取得: outgoing は10件ずつ、incoming は10件ずつAPIバッチ → 50件ずつDBバッチで処理
 
 ### 4.3 深さ制限
 
@@ -208,25 +231,30 @@ pages (1) ──── (N) links (N) ──── (1) pages
 |-----------|-----------|-------------|
 | `connected` | 接続確立時 | `{start, goal, depth}` |
 | `normalize` | タイトル正規化時 | `{title, role}` |
-| `search_start` | 探索開始 | `{start, goal, max_depth_total}` |
-| `cache_classify` | キャッシュ判定完了 | `{fresh, check, stale, missing}` |
+| `search_start` | 探索開始 | `{start, goal, max_depth_per_side, max_depth_total}` |
+| `cache_classify` | キャッシュ判定完了 | `{fresh, check, missing}` |
 | `cache_check_touched` | touched確認開始 | `{count}` |
-| `fetching_links` | リンク取得開始 | `{count}` |
+| `fetching_links` | 出リンク取得開始 | `{count}` |
+| `fetching_incoming` | 入リンク取得開始 | `{count}` |
 | `fetching_progress` | リンク取得進捗 | `{current, total, title}` |
-| `fetching_incoming` | 入リンク取得中 | `{count}` |
-| `layer_start` | 層の展開開始 | `{direction, depth, frontier_size}` |
-| `layer_end` | 層の展開完了 | `{direction, new_frontier_size}` |
+| `empty_response` | APIが空応答を返した | `{title}` |
+| `layer_start` | 層の展開開始 | `{direction, depth, frontier_size, total_depth}` |
+| `layer_end` | 層の展開完了 | `{direction, depth, new_frontier_size}` |
+| `retry` | 空フロンティアのリトライ | `{direction, attempt, frontier_size}` |
 | `meeting` | 出会い点発見 | `{node}` |
-| `result` | 経路発見 | `{clicks, path, history_id}` |
+| `result` | 経路発見 | `{clicks, path, history_id, duration_ms}` |
 | `error` | エラー発生 | `{message}` |
 | `done` | 探索終了 | `{}` |
 
+各進捗イベントには `api_calls`（累計APIリクエスト数）と `visited_count`（累計訪問ノード数）が自動付加される。
+
 ### 5.2 安全策
 
-- **タイムアウト**: 540秒でハードタイムアウト
-- **クライアント切断検知**: `connection_aborted()` で検知し、即座に探索を中止
+- **タイムアウト**: 540秒でアプリレベルのハードタイムアウト（`set_time_limit(0)` でPHP側は無制限）
+- **クライアント切断検知**: `connection_aborted()` で検知し、例外を投げて探索を中止
 - **シャットダウンハンドラ**: 異常終了時にも `error` と `done` イベントを送信
 - **出力バッファリング無効化**: `ob_end_flush()`、`zlib.output_compression = 0` 等
+- **Nginxバッファリング無効化**: `X-Accel-Buffering: no` ヘッダ
 
 ---
 
@@ -236,7 +264,7 @@ pages (1) ──── (N) links (N) ──── (1) pages
 
 | ファイル | 役割 |
 |---------|------|
-| `PathFinderController.php` | メインの探索ページ。SSEストリーム、サジェストAPIを提供 |
+| `PathFinderController.php` | メインの探索ページ。SSEストリーム、サジェストAPIを提供。履歴記録ヘルパーメソッドを内包 |
 | `HistoryController.php` | 探索履歴の一覧と詳細表示 |
 | `StatsController.php` | 統計ダッシュボードのデータ集計と表示 |
 
@@ -246,7 +274,7 @@ pages (1) ──── (N) links (N) ──── (1) pages
 |---------|---------|---------|
 | `Page.php` | pages | timestamps無効、outgoing/incomingリレーション |
 | `Link.php` | links | 複合主キー、timestamps無効 |
-| `PageMeta.php` | page_meta | page_idが主キー、日時キャスト |
+| `PageMeta.php` | page_meta | page_idが主キー、日時キャスト（incoming含む）|
 | `SearchHistory.php` | search_history | timestamps無効（独自のsearched_at使用）|
 | `SearchPathStep.php` | search_path_steps | 複合主キー、timestamps無効 |
 
@@ -255,15 +283,15 @@ pages (1) ──── (N) links (N) ──── (1) pages
 | ファイル | 役割 |
 |---------|------|
 | `WikipediaPathFinder.php` | 双方向BFSアルゴリズムの実装。探索のオーケストレーション |
-| `WikipediaApiClient.php` | Wikipedia MediaWiki APIとのHTTP通信を担当 |
-| `LinkProvider.php` | リンク取得のキャッシュ層。DBキャッシュとAPIの仲介 |
+| `WikipediaApiClient.php` | Wikipedia MediaWiki APIとのHTTP通信。アダプティブスロットリング、リトライ、バッチ取得を担当 |
+| `LinkProvider.php` | リンク取得のキャッシュ層。outgoing/incoming両方向のDBキャッシュとAPIの仲介 |
 
 ### 6.4 Repositories（`app/Repositories/`）
 
 | ファイル | 役割 |
 |---------|------|
-| `PageRepository.php` | ページの検索・作成、キャッシュ鮮度判定、メタ情報管理 |
-| `LinkRepository.php` | リンクの読み取り・置換・削除 |
+| `PageRepository.php` | ページの検索・作成、outgoing/incoming両方向のキャッシュ鮮度判定、メタ情報管理 |
+| `LinkRepository.php` | リンクの読み取り（outgoing/incoming）・置換・追加・削除 |
 | `SearchHistoryRepository.php` | 探索結果の記録（append only）|
 
 ### 6.5 Views（`resources/views/`）
@@ -294,13 +322,14 @@ pages (1) ──── (N) links (N) ──── (1) pages
 
 ### 6.8 マイグレーション（`database/migrations/`）
 
-| ファイル | 作成するテーブル |
-|---------|---------------|
+| ファイル | 作成するテーブル / 変更 |
+|---------|----------------------|
 | `2026_05_03_014132_create_pages_table.php` | pages |
 | `2026_05_03_014144_create_links_table.php` | links |
 | `2026_05_03_014150_create_page_meta_table.php` | page_meta |
 | `2026_05_03_014158_create_search_history_table.php` | search_history |
 | `2026_05_03_014203_create_search_path_steps_table.php` | search_path_steps |
+| `2026_05_03_023275_add_incoming_cache_to_page_meta.php` | page_metaにincoming用カラム追加 |
 
 ---
 
@@ -312,17 +341,23 @@ pages (1) ──── (N) links (N) ──── (1) pages
 |------|-------------|----------|
 | タイトル正規化 | `action=query` | `titles`, `redirects=1` |
 | 出ていくリンク取得 | `action=query`, `prop=links` | `pllimit=max`, `plnamespace=0` |
+| 出ていくリンク一括取得 | `action=query`, `prop=links` | `titles`（パイプ区切り10件ずつ）|
 | 入ってくるリンク取得 | `action=query`, `prop=linkshere` | `lhlimit=max`, `lhnamespace=0`, `lhshow=!redirect` |
+| 入ってくるリンク一括取得 | `action=query`, `prop=linkshere` | `titles`（パイプ区切り10件ずつ）|
 | 最終更新日時取得 | `action=query`, `prop=info` | titles（最大50件一括）|
 | サジェスト | `action=opensearch` | `search`, `limit`, `namespace=0` |
 
 ### 7.2 APIリクエストの信頼性
 
-- リトライ: 最大2回（5xx系エラーまたは通信エラー時）
-- リトライ間隔: 500ms
-- タイムアウト: 15秒（設定変更可）
-- User-Agent: `WikiPathFinder/1.0 (Laravel demo)`
-- 空応答ガード: APIが0件を返した場合、DBの既存データを上書きしない
+- **リトライ**: 最大4回（429レートリミットまたは5xxエラー時）
+- **アダプティブスロットリング**: リクエスト間に最低1秒の間隔（初期値）
+  - 429受信時: スロットル間隔を2倍に引き上げ（最大5秒）
+  - 成功時: スロットル間隔を10%ずつ緩和（基底値まで戻す）
+- **Retry-Afterヘッダ対応**: 429レスポンスにRetry-Afterが含まれる場合はその秒数を優先
+- **指数バックオフ**: 429は5s→10s→20s、5xxは500ms→1s→2s
+- **タイムアウト**: 15秒（設定変更可）
+- **User-Agent**: `WikiPathFinder/1.0 (takeshilingmu027@gmail.com)`
+- **空応答ガード**: APIが0件を返した場合、DBの既存データを上書きしない
 
 ---
 
@@ -351,18 +386,21 @@ pages (1) ──── (N) links (N) ──── (1) pages
 ### 9.1 入力バリデーション
 
 - URLパース: 正規表現で `https://{lang}.wikipedia.org/wiki/{title}` 形式を検証
+- 多重エンコード対策: `%25XX` パターンを最大5回デコード
 - 言語コード: `^[a-z-]{2,12}$` で制限
 - 深さ: 設定ファイルの `min_depth_per_side`〜`max_depth_per_side` にクランプ
 
 ### 9.2 パフォーマンス
 
 - リンクのチャンク挿入: 1,000件ずつ `insertOrIgnore`
-- ページのバルク作成: `ensurePages` で一括upsert
+- ページのバルク作成: `ensurePages` で一括upsert（10,000件ずつチャンク処理）
 - touched確認の一括化: Wikipedia APIの `titles` パラメータで最大50件ずつ一括取得
+- バッチAPI取得: outgoing/incoming共に複数タイトルをパイプ区切りでまとめて取得
 - `ignore_user_abort(false)`: ブラウザ閉鎖時に即座にPHPプロセスを停止
 
 ### 9.3 エラーハンドリング
 
-- 失敗した探索も `found=false` で履歴に記録
+- 失敗した探索も `found=false` で履歴に記録（履歴記録の失敗は探索結果に影響しないよう `try-catch` で防御）
 - API部分エラー時は収集済みのリンクを返す（部分的成功）
 - シャットダウンハンドラで異常終了時にもSSEの終了イベントを送信
+- 空フロンティア時のリトライで一時的なAPI障害を吸収
