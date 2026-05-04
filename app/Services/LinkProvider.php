@@ -250,10 +250,10 @@ class LinkProvider
     }
 
     /**
-     * Incoming リンクを Wikipedia から取得して DB に保存する
+     * Incoming リンクを Wikipedia から取得して DB に保存する（バッチ版）。
      *
+     * 50 タイトルずつまとめて API を叩き、リクエスト数を大幅に削減する。
      * Outgoing と違い、既存レコードを削除せず追加のみ行う(insertOrIgnore)。
-     * これにより forward 側が先に保存したリンクを壊さない。
      */
     private function fetchAndStoreIncoming(array $titleIdMap): void
     {
@@ -263,37 +263,39 @@ class LinkProvider
 
         $this->emit('fetching_incoming', ['count' => $total]);
 
-        $i = 0;
-        foreach ($titles as $title) {
-            $i++;
-            $this->emit('fetching_progress', [
-                'current' => $i,
-                'total'   => $total,
-                'title'   => $title,
-            ]);
+        $processed = 0;
 
-            $targetId   = $titleIdMap[$title];
-            $linkTitles = $this->api->getAllIncomingLinks($title);
-            $linkTitles = array_values(array_unique($linkTitles));
+        // 50件ずつバッチで API 取得 → ページ単位で DB 保存
+        foreach (array_chunk($titles, 50) as $chunk) {
+            $batchResult = $this->api->getBatchIncomingLinks($chunk);
 
-            // ★ 空応答ガード
-            if (empty($linkTitles)) {
-                \Log::warning('[LinkProvider] empty incoming result from API, skipping save', [
-                    'title' => $title,
+            foreach ($chunk as $title) {
+                $processed++;
+                $this->emit('fetching_progress', [
+                    'current' => $processed,
+                    'total'   => $total,
+                    'title'   => $title,
                 ]);
-                $this->emit('empty_response', ['title' => $title]);
-                continue;
+
+                $targetId   = $titleIdMap[$title];
+                $linkTitles = array_values(array_unique($batchResult[$title] ?? []));
+
+                // 空応答: メタだけ記録（incoming_link_count=0 → 次回 stale で再取得）
+                if (empty($linkTitles)) {
+                    $this->pageRepo->upsertIncomingMeta($targetId, 0);
+                    continue;
+                }
+
+                // リンク元ページのIDを確保
+                $sourceIdMap = $this->pageRepo->ensurePages($linkTitles);
+                $sourceIds = array_values($sourceIdMap);
+
+                // 追加のみ(既存は壊さない)
+                $this->linkRepo->addIncomingLinks($targetId, $sourceIds);
+
+                // incoming メタを更新
+                $this->pageRepo->upsertIncomingMeta($targetId, count($sourceIds));
             }
-
-            // リンク元ページのIDを確保
-            $sourceIdMap = $this->pageRepo->ensurePages($linkTitles);
-            $sourceIds = array_values($sourceIdMap);
-
-            // 追加のみ(既存は壊さない)
-            $this->linkRepo->addIncomingLinks($targetId, $sourceIds);
-
-            // incoming メタを更新
-            $this->pageRepo->upsertIncomingMeta($targetId, count($sourceIds));
         }
     }
 }
