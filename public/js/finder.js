@@ -156,10 +156,10 @@
         source.addEventListener('cache_classify', (ev) => {
             touch();
             const d = JSON.parse(ev.data);
-            const fresh = d.fresh, check = d.check, stale = d.stale, missing = d.missing;
-            const total = fresh + check + stale + missing;
+            const fresh = d.fresh, check = d.check, missing = d.missing;
+            const total = fresh + check + missing;
             if (total > 0) {
-                log(`📦 キャッシュ判定: 新鮮${fresh} / 確認${check} / 古い${stale} / 未取得${missing}`, 'fwd');
+                log(`📦 キャッシュ判定: 新鮮${fresh} / 確認${check} / 未取得${missing}`, 'fwd');
             }
             updateCounters(d);
         });

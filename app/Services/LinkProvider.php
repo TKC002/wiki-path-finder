@@ -97,24 +97,24 @@ class LinkProvider
         $this->emit('cache_classify', [
             'fresh' => count($classified['fresh']),
             'check' => count($classified['check']),
-            'stale' => count($classified['stale']),
             'missing' => count($classified['missing']),
         ]);
 
-        // 4. 'check' グループの処理
+        // 4. 'check' グループの処理(outgoing のみ touched 比較)
+        $needFetch = [];
         if (!empty($classified['check'])) {
             if ($direction === 'outgoing') {
-                // outgoing: touched で変更確認 → fresh or stale に再分類
-                $this->verifyAndRedistribute($classified);
+                // touched で変更確認 → fresh or needFetch に再分類
+                $needFetch = $this->verifyAndRedistribute($classified);
             } else {
-                // incoming: touched では判定できないので一律 stale 扱い
-                $classified['stale'] = array_merge($classified['stale'], $classified['check']);
+                // incoming: touched では判定できないので一律再取得
+                $needFetch = $classified['check'];
                 $classified['check'] = [];
             }
         }
 
-        // 5. APIから取得すべきもの = stale + missing
-        $needFetch = array_merge($classified['stale'], $classified['missing']);
+        // 5. APIから取得すべきもの = needFetch + missing
+        $needFetch = array_merge($needFetch, $classified['missing']);
 
         if (!empty($needFetch)) {
             if ($direction === 'outgoing') {
@@ -159,7 +159,7 @@ class LinkProvider
      */
     private function classifyByFreshness(array $idMap, array $freshnessMap): array
     {
-        $buckets = ['fresh' => [], 'check' => [], 'stale' => [], 'missing' => []];
+        $buckets = ['fresh' => [], 'check' => [], 'missing' => []];
         foreach ($idMap as $title => $id) {
             $f = $freshnessMap[$id] ?? 'missing';
             $buckets[$f][$title] = $id;
@@ -170,14 +170,18 @@ class LinkProvider
     /**
      * 'check' グループに対して touched を確認し、
      * - Wikipedia 側が不変 → fresh扱い + fetched_at だけ更新
-     * - Wikipedia 側が更新あり → stale扱い に降格(後続で再取得)
+     * - Wikipedia 側が更新あり → 再取得が必要(戻り値に含める)
+     *
+     * @return array  再取得が必要な [title => id]
      */
-    private function verifyAndRedistribute(array &$classified): void
+    private function verifyAndRedistribute(array &$classified): array
     {
         $checkTitles = array_keys($classified['check']);
         $this->emit('cache_check_touched', ['count' => count($checkTitles)]);
 
         $touchedMap = $this->api->getTouchedTimes($checkTitles);  // title => Carbon|null
+
+        $needFetch = [];
 
         foreach ($classified['check'] as $title => $id) {
             $newTouched = $touchedMap[$title] ?? null;
@@ -194,13 +198,15 @@ class LinkProvider
             }
 
             if ($changed) {
-                $classified['stale'][$title] = $id;
+                $needFetch[$title] = $id;
             } else {
                 $this->pageRepo->refreshFetchedAt($id);
                 $classified['fresh'][$title] = $id;
             }
         }
         $classified['check'] = [];
+
+        return $needFetch;
     }
 
     /**
@@ -285,7 +291,7 @@ class LinkProvider
                 $targetId = $titleIdMap[$title];
                 $linkTitles = array_values(array_unique($batchResult[$title] ?? []));
 
-                // 空応答: メタだけ記録（incoming_link_count=0 → 次回 stale で再取得）
+                // 空応答: メタだけ記録（incoming_link_count=0 → 次回再取得）
                 if (empty($linkTitles)) {
                     $this->pageRepo->upsertIncomingMeta($targetId, 0);
                     continue;

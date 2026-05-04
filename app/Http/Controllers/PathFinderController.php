@@ -38,7 +38,7 @@ class PathFinderController
 
             // ★ 探索全体のタイムアウト(秒)
             $hardTimeoutSec = 540; // PHPのset_time_limitより少し短く
-            set_time_limit($hardTimeoutSec + 60);
+            set_time_limit(0);
             $absoluteDeadline = microtime(true) + $hardTimeoutSec;
 
             // ★ シャットダウンハンドラ: 異常終了時にも error/done を送る

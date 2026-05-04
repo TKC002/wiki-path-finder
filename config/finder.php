@@ -14,10 +14,10 @@ return [
     'max_depth_per_side' => 5,
 
     /*
-     * リンクキャッシュの鮮度判定(案C)
+     * リンクキャッシュの鮮度判定
+     * fresh_ttl_hours 以内なら即キャッシュ利用、超過分は touched 比較で判定
      */
     'fresh_ttl_hours'   => env('FINDER_FRESH_TTL_HOURS', 24),
-    'max_ttl_days'      => env('FINDER_MAX_TTL_DAYS', 7),
 
     /*
      * Wikipedia APIへの並列リクエスト数

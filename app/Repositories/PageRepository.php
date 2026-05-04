@@ -79,10 +79,9 @@ class PageRepository
     /**
      * 指定ページIDのキャッシュ鮮度を判定する。
      *
-     * 戻り値: 'fresh' | 'check' | 'stale' | 'missing'
+     * 戻り値: 'fresh' | 'check' | 'missing'
      *   - fresh   : 24h以内、即DBから使える
-     *   - check   : 24h〜7d、touched確認が必要
-     *   - stale   : 7d超、強制再取得
+     *   - check   : 24h以上、touched確認が必要
      *   - missing : page_meta に行がない
      */
     public function getFreshness(int $pageId): string
@@ -94,13 +93,8 @@ class PageRepository
 
         $hoursOld = $meta->fetched_at->diffInHours(Carbon::now());
         $freshTtl = config('finder.fresh_ttl_hours', 24);
-        $maxTtl = config('finder.max_ttl_days', 7) * 24;
 
-        if ($hoursOld < $freshTtl)
-            return 'fresh';
-        if ($hoursOld < $maxTtl)
-            return 'check';
-        return 'stale';
+        return ($hoursOld < $freshTtl) ? 'fresh' : 'check';
     }
 
     /** 複数ページの鮮度を一括判定 (id => freshness) */
@@ -112,7 +106,6 @@ class PageRepository
         $metas = PageMeta::whereIn('page_id', $pageIds)->get()->keyBy('page_id');
 
         $freshTtl = config('finder.fresh_ttl_hours', 24);
-        $maxTtl = config('finder.max_ttl_days', 7) * 24;
         $now = Carbon::now();
 
         $result = [];
@@ -122,19 +115,17 @@ class PageRepository
                 $result[$id] = 'missing';
                 continue;
             }
-            // リンク数0はAPI失敗の可能性があるため常に再取得
+            // リンク数0はAPI失敗の可能性があるため touched 確認へ
             if ($meta->link_count === 0) {
-                $result[$id] = 'stale';
+                $result[$id] = 'check';
                 continue;
             }
 
             $hoursOld = $meta->fetched_at->diffInHours($now);
             if ($hoursOld < $freshTtl) {
                 $result[$id] = 'fresh';
-            } elseif ($hoursOld < $maxTtl) {
-                $result[$id] = 'check';
             } else {
-                $result[$id] = 'stale';
+                $result[$id] = 'check';
             }
         }
         return $result;
@@ -170,7 +161,8 @@ class PageRepository
      *
      * Outgoing と違い、ターゲットページの touched_at では
      * incoming リンクの変化を検知できない(他ページの変更で変わるため)。
-     * そのため 'check' は使わず 'fresh' / 'stale' / 'missing' の3段階。
+     * そのため 'check' は使わず 'fresh' / 'missing' の2段階。
+     * fresh でないものは missing 扱いとし、常に再取得する。
      */
     public function getIncomingFreshnessMap(array $pageIds): array
     {
@@ -191,7 +183,7 @@ class PageRepository
             }
             // リンク数0はAPI失敗の可能性があるため常に再取得
             if ($meta->incoming_link_count === 0) {
-                $result[$id] = 'stale';
+                $result[$id] = 'missing';
                 continue;
             }
 
@@ -199,7 +191,7 @@ class PageRepository
             if ($hoursOld < $freshTtl) {
                 $result[$id] = 'fresh';
             } else {
-                $result[$id] = 'stale';
+                $result[$id] = 'missing';
             }
         }
         return $result;
@@ -217,7 +209,7 @@ class PageRepository
             ]);
         } else {
             // 新規行: fetched_at (outgoing側) は NOT NULL なので
-            // 十分古い値を入れて stale 扱いにする
+            // 十分古い値を入れて check 扱いにする
             PageMeta::create([
                 'page_id' => $pageId,
                 'fetched_at' => Carbon::createFromTimestamp(0),
