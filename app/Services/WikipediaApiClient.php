@@ -69,9 +69,9 @@ class WikipediaApiClient
         }
         if (!$response->ok()) {
             Log::warning('[WikipediaApiClient] normalizeTitle: HTTP error', [
-                'title'  => $title,
+                'title' => $title,
                 'status' => $response->status(),
-                'body'   => substr($response->body(), 0, 500),
+                'body' => substr($response->body(), 0, 500),
             ]);
             return null;
         }
@@ -80,7 +80,7 @@ class WikipediaApiClient
         if (!$page) {
             Log::warning('[WikipediaApiClient] normalizeTitle: no page in response', [
                 'title' => $title,
-                'body'  => substr($response->body(), 0, 500),
+                'body' => substr($response->body(), 0, 500),
             ]);
             return null;
         }
@@ -95,7 +95,7 @@ class WikipediaApiClient
         if (($page['ns'] ?? null) !== 0) {
             Log::warning('[WikipediaApiClient] normalizeTitle: not main namespace', [
                 'title' => $title,
-                'ns'    => $page['ns'] ?? 'null',
+                'ns' => $page['ns'] ?? 'null',
             ]);
             return null;
         }
@@ -155,6 +155,54 @@ class WikipediaApiClient
         } while ($plcontinue !== null);
 
         return $allLinks;
+    }
+    public function getBatchOutgoingLinks(array $titles): array
+    {
+        $result = array_fill_keys($titles, []);
+
+        foreach (array_chunk($titles, 10) as $chunk) {
+            $plcontinue = null;
+
+            do {
+                $params = [
+                    'action' => 'query',
+                    'titles' => implode('|', $chunk),
+                    'prop' => 'links',
+                    'pllimit' => 'max',
+                    'plnamespace' => 0,
+                    'format' => 'json',
+                    'formatversion' => 2,
+                ];
+                if ($plcontinue !== null) {
+                    $params['plcontinue'] = $plcontinue;
+                }
+
+                $response = $this->get($params);
+                if (!$response || !$response->ok()) {
+                    break;
+                }
+
+                $data = $response->json();
+
+                foreach ($data['query']['pages'] ?? [] as $page) {
+                    if (isset($page['missing']))
+                        continue;
+                    $pageTitle = $page['title'] ?? null;
+                    if ($pageTitle === null)
+                        continue;
+
+                    foreach ($page['links'] ?? [] as $link) {
+                        if (isset($link['title'])) {
+                            $result[$pageTitle][] = $link['title'];
+                        }
+                    }
+                }
+
+                $plcontinue = $data['continue']['plcontinue'] ?? null;
+            } while ($plcontinue !== null);
+        }
+
+        return $result;
     }
 
     /**
@@ -252,9 +300,11 @@ class WikipediaApiClient
                 $data = $response->json();
 
                 foreach ($data['query']['pages'] ?? [] as $page) {
-                    if (isset($page['missing'])) continue;
+                    if (isset($page['missing']))
+                        continue;
                     $pageTitle = $page['title'] ?? null;
-                    if ($pageTitle === null) continue;
+                    if ($pageTitle === null)
+                        continue;
 
                     foreach ($page['linkshere'] ?? [] as $link) {
                         if (isset($link['title'])) {
@@ -379,11 +429,11 @@ class WikipediaApiClient
                     // ★ Retry-After ヘッダーがあればその秒数を優先
                     $backoffMs = $this->resolveBackoffMs($response, $attempt, $status);
                     Log::warning('[WikipediaApiClient] retryable error, backing off', [
-                        'status'       => $status,
-                        'attempt'      => $attempt,
-                        'retry_after'  => $response->header('Retry-After'),
-                        'backoff_ms'   => $backoffMs,
-                        'throttle_ms'  => (int) ($this->throttleUs / 1000),
+                        'status' => $status,
+                        'attempt' => $attempt,
+                        'retry_after' => $response->header('Retry-After'),
+                        'backoff_ms' => $backoffMs,
+                        'throttle_ms' => (int) ($this->throttleUs / 1000),
                     ]);
                     usleep($backoffMs * 1000);
                     continue;
@@ -392,7 +442,7 @@ class WikipediaApiClient
                 if (!$isRetryable || $attempt >= $maxAttempts) {
                     if ($status === 429 || $response->serverError()) {
                         Log::warning('[WikipediaApiClient] retryable error exhausted', [
-                            'status'  => $status,
+                            'status' => $status,
                             'attempt' => $attempt,
                         ]);
                     }
@@ -404,8 +454,8 @@ class WikipediaApiClient
                 if ($attempt < $maxAttempts) {
                     $backoffMs = $this->backoffMs($attempt, 0);
                     Log::warning('[WikipediaApiClient] HTTP exception, backing off', [
-                        'message'    => $e->getMessage(),
-                        'attempt'    => $attempt,
+                        'message' => $e->getMessage(),
+                        'attempt' => $attempt,
                         'backoff_ms' => $backoffMs,
                     ]);
                     usleep($backoffMs * 1000);

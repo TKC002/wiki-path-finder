@@ -21,22 +21,25 @@ class PageRepository
         $titles = array_values(array_unique($titles));
 
         // 既存を一括取得
-        $existing = Page::whereIn('title', $titles)
-            ->pluck('id', 'title')
-            ->all();
+        $existing = [];
+        foreach (array_chunk($titles, 10000) as $chunk) {
+            $existing += Page::whereIn('title', $chunk)
+                ->pluck('id', 'title')
+                ->all();
+        }
 
         // 不足分を作成
         $missing = array_diff($titles, array_keys($existing));
         if (!empty($missing)) {
-            $rows = array_map(fn ($t) => ['title' => $t], $missing);
-            // insertOrIgnore: 既存があってもエラーにしない(レース条件対策)
-            Page::insertOrIgnore($rows);
+            foreach (array_chunk($missing, 10000) as $chunk) {
+                $rows = array_map(fn($t) => ['title' => $t], $chunk);
+                Page::insertOrIgnore($rows);
 
-            // 作成したものを取り直す
-            $reread = Page::whereIn('title', $missing)
-                ->pluck('id', 'title')
-                ->all();
-            $existing = $existing + $reread;
+                $reread = Page::whereIn('title', $chunk)
+                    ->pluck('id', 'title')
+                    ->all();
+                $existing += $reread;
+            }
         }
 
         return $existing;
@@ -57,10 +60,16 @@ class PageRepository
     /** ID 配列 → ID=>タイトル の連想配列 */
     public function getTitleMap(array $ids): array
     {
-        if (empty($ids)) return [];
-        return Page::whereIn('id', $ids)
-            ->pluck('title', 'id')
-            ->all();
+        if (empty($ids))
+            return [];
+
+        $result = [];
+        foreach (array_chunk($ids, 10000) as $chunk) {
+            $result += Page::whereIn('id', $chunk)
+                ->pluck('title', 'id')
+                ->all();
+        }
+        return $result;
     }
 
     // -----------------------------------------------------------
@@ -85,23 +94,26 @@ class PageRepository
 
         $hoursOld = $meta->fetched_at->diffInHours(Carbon::now());
         $freshTtl = config('finder.fresh_ttl_hours', 24);
-        $maxTtl   = config('finder.max_ttl_days', 7) * 24;
+        $maxTtl = config('finder.max_ttl_days', 7) * 24;
 
-        if ($hoursOld < $freshTtl) return 'fresh';
-        if ($hoursOld < $maxTtl)   return 'check';
+        if ($hoursOld < $freshTtl)
+            return 'fresh';
+        if ($hoursOld < $maxTtl)
+            return 'check';
         return 'stale';
     }
 
     /** 複数ページの鮮度を一括判定 (id => freshness) */
     public function getFreshnessMap(array $pageIds): array
     {
-        if (empty($pageIds)) return [];
+        if (empty($pageIds))
+            return [];
 
         $metas = PageMeta::whereIn('page_id', $pageIds)->get()->keyBy('page_id');
 
         $freshTtl = config('finder.fresh_ttl_hours', 24);
-        $maxTtl   = config('finder.max_ttl_days', 7) * 24;
-        $now      = Carbon::now();
+        $maxTtl = config('finder.max_ttl_days', 7) * 24;
+        $now = Carbon::now();
 
         $result = [];
         foreach ($pageIds as $id) {
@@ -135,8 +147,8 @@ class PageRepository
             ['page_id' => $pageId],
             [
                 'wiki_touched_at' => $wikiTouchedAt,
-                'fetched_at'      => Carbon::now(),
-                'link_count'      => $linkCount,
+                'fetched_at' => Carbon::now(),
+                'link_count' => $linkCount,
             ]
         );
     }
@@ -162,12 +174,13 @@ class PageRepository
      */
     public function getIncomingFreshnessMap(array $pageIds): array
     {
-        if (empty($pageIds)) return [];
+        if (empty($pageIds))
+            return [];
 
         $metas = PageMeta::whereIn('page_id', $pageIds)->get()->keyBy('page_id');
 
         $freshTtl = config('finder.fresh_ttl_hours', 24);
-        $now      = Carbon::now();
+        $now = Carbon::now();
 
         $result = [];
         foreach ($pageIds as $id) {
@@ -199,17 +212,17 @@ class PageRepository
         if ($meta) {
             // 既存行: incoming 側のカラムだけ更新
             $meta->update([
-                'incoming_fetched_at'  => Carbon::now(),
-                'incoming_link_count'  => $incomingLinkCount,
+                'incoming_fetched_at' => Carbon::now(),
+                'incoming_link_count' => $incomingLinkCount,
             ]);
         } else {
             // 新規行: fetched_at (outgoing側) は NOT NULL なので
             // 十分古い値を入れて stale 扱いにする
             PageMeta::create([
-                'page_id'              => $pageId,
-                'fetched_at'           => Carbon::createFromTimestamp(0),
-                'incoming_fetched_at'  => Carbon::now(),
-                'incoming_link_count'  => $incomingLinkCount,
+                'page_id' => $pageId,
+                'fetched_at' => Carbon::createFromTimestamp(0),
+                'incoming_fetched_at' => Carbon::now(),
+                'incoming_link_count' => $incomingLinkCount,
             ]);
         }
     }

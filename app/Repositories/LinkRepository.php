@@ -13,16 +13,17 @@ class LinkRepository
      */
     public function getOutgoingTargetIds(array $sourceIds): array
     {
-        if (empty($sourceIds)) return [];
-
-        $rows = Link::whereIn('source_id', $sourceIds)
-            ->select('source_id', 'target_id')
-            ->get();
+        if (empty($sourceIds))
+            return [];
 
         $result = array_fill_keys($sourceIds, []);
-        foreach ($rows as $row) {
-            $result[$row->source_id][] = $row->target_id;
-        }
+        DB::table('links')
+            ->whereIn('source_id', $sourceIds)
+            ->select('source_id', 'target_id')
+            ->cursor()
+            ->each(function ($row) use (&$result) {
+                $result[$row->source_id][] = $row->target_id;
+            });
         return $result;
     }
 
@@ -32,16 +33,17 @@ class LinkRepository
      */
     public function getIncomingSourceIds(array $targetIds): array
     {
-        if (empty($targetIds)) return [];
-
-        $rows = Link::whereIn('target_id', $targetIds)
-            ->select('source_id', 'target_id')
-            ->get();
+        if (empty($targetIds))
+            return [];
 
         $result = array_fill_keys($targetIds, []);
-        foreach ($rows as $row) {
-            $result[$row->target_id][] = $row->source_id;
-        }
+        DB::table('links')
+            ->whereIn('target_id', $targetIds)
+            ->select('source_id', 'target_id')
+            ->cursor()
+            ->each(function ($row) use (&$result) {
+                $result[$row->target_id][] = $row->source_id;
+            });
         return $result;
     }
 
@@ -55,11 +57,12 @@ class LinkRepository
             // 既存削除
             Link::where('source_id', $sourceId)->delete();
 
-            if (empty($targetIds)) return;
+            if (empty($targetIds))
+                return;
 
             // 新規挿入(チャンク分割で大量データに対応)
             $rows = array_map(
-                fn ($tid) => ['source_id' => $sourceId, 'target_id' => $tid],
+                fn($tid) => ['source_id' => $sourceId, 'target_id' => $tid],
                 array_unique($targetIds)
             );
             foreach (array_chunk($rows, 1000) as $chunk) {
@@ -76,10 +79,11 @@ class LinkRepository
      */
     public function addIncomingLinks(int $targetId, array $sourceIds): void
     {
-        if (empty($sourceIds)) return;
+        if (empty($sourceIds))
+            return;
 
         $rows = array_map(
-            fn ($sid) => ['source_id' => $sid, 'target_id' => $targetId],
+            fn($sid) => ['source_id' => $sid, 'target_id' => $targetId],
             array_values(array_unique($sourceIds))
         );
         foreach (array_chunk($rows, 1000) as $chunk) {

@@ -26,8 +26,8 @@ class LinkProvider
         PageRepository $pageRepo,
         LinkRepository $linkRepo
     ) {
-        $this->lang     = $lang;
-        $this->api      = $api;
+        $this->lang = $lang;
+        $this->api = $api;
         $this->pageRepo = $pageRepo;
         $this->linkRepo = $linkRepo;
     }
@@ -77,7 +77,8 @@ class LinkProvider
      */
     private function getLinks(array $titles, string $direction): array
     {
-        if (empty($titles)) return [];
+        if (empty($titles))
+            return [];
 
         $titles = array_values(array_unique($titles));
 
@@ -94,9 +95,9 @@ class LinkProvider
         $classified = $this->classifyByFreshness($idMap, $freshnessMap);
 
         $this->emit('cache_classify', [
-            'fresh'   => count($classified['fresh']),
-            'check'   => count($classified['check']),
-            'stale'   => count($classified['stale']),
+            'fresh' => count($classified['fresh']),
+            'check' => count($classified['check']),
+            'stale' => count($classified['stale']),
             'missing' => count($classified['missing']),
         ]);
 
@@ -134,7 +135,8 @@ class LinkProvider
         // 7. ID → タイトル変換
         $allLinkedIds = [];
         foreach ($linkIdsByPageId as $linkedIds) {
-            foreach ($linkedIds as $lid) $allLinkedIds[$lid] = true;
+            foreach ($linkedIds as $lid)
+                $allLinkedIds[$lid] = true;
         }
         $titleMap = $this->pageRepo->getTitleMap(array_keys($allLinkedIds));
 
@@ -207,45 +209,47 @@ class LinkProvider
     private function fetchAndStoreOutgoing(array $titleIdMap): void
     {
         $titles = array_keys($titleIdMap);
-        $total  = count($titles);
-        if ($total === 0) return;
+        $total = count($titles);
+        if ($total === 0)
+            return;
 
         $this->emit('fetching_links', ['count' => $total]);
-
         $touchedMap = $this->api->getTouchedTimes($titles);
+        $processed = 0;
 
-        $i = 0;
-        foreach ($titles as $title) {
-            $i++;
-            $this->emit('fetching_progress', [
-                'current' => $i,
-                'total'   => $total,
-                'title'   => $title,
-            ]);
+        foreach (array_chunk($titles, 10) as $chunk) {
+            $batchResult = $this->api->getBatchOutgoingLinks($chunk);
 
-            $sourceId    = $titleIdMap[$title];
-            $linkTitles  = $this->api->getAllOutgoingLinks($title);
-            $linkTitles  = array_values(array_unique($linkTitles));
-
-            // ★ 空応答ガード: API が 0件返した場合は DB を書き換えない
-            if (empty($linkTitles)) {
-                \Log::warning('[LinkProvider] empty outgoing result from API, skipping save', [
+            foreach ($chunk as $title) {
+                $processed++;
+                $this->emit('fetching_progress', [
+                    'current' => $processed,
+                    'total' => $total,
                     'title' => $title,
                 ]);
-                $this->emit('empty_response', ['title' => $title]);
-                continue;
+
+                $sourceId = $titleIdMap[$title];
+                $linkTitles = array_values(array_unique($batchResult[$title] ?? []));
+
+                if (empty($linkTitles)) {
+                    \Log::warning('[LinkProvider] empty outgoing result from API, skipping save', [
+                        'title' => $title,
+                    ]);
+                    $this->emit('empty_response', ['title' => $title]);
+                    continue;
+                }
+
+                $targetIdMap = $this->pageRepo->ensurePages($linkTitles);
+                $targetIds = array_values($targetIdMap);
+
+                $this->linkRepo->replaceOutgoingLinks($sourceId, $targetIds);
+
+                $this->pageRepo->upsertMeta(
+                    $sourceId,
+                    $touchedMap[$title] ?? null,
+                    count($targetIds)
+                );
             }
-
-            $targetIdMap = $this->pageRepo->ensurePages($linkTitles);
-            $targetIds = array_values($targetIdMap);
-
-            $this->linkRepo->replaceOutgoingLinks($sourceId, $targetIds);
-
-            $this->pageRepo->upsertMeta(
-                $sourceId,
-                $touchedMap[$title] ?? null,
-                count($targetIds)
-            );
         }
     }
 
@@ -258,8 +262,9 @@ class LinkProvider
     private function fetchAndStoreIncoming(array $titleIdMap): void
     {
         $titles = array_keys($titleIdMap);
-        $total  = count($titles);
-        if ($total === 0) return;
+        $total = count($titles);
+        if ($total === 0)
+            return;
 
         $this->emit('fetching_incoming', ['count' => $total]);
 
@@ -273,11 +278,11 @@ class LinkProvider
                 $processed++;
                 $this->emit('fetching_progress', [
                     'current' => $processed,
-                    'total'   => $total,
-                    'title'   => $title,
+                    'total' => $total,
+                    'title' => $title,
                 ]);
 
-                $targetId   = $titleIdMap[$title];
+                $targetId = $titleIdMap[$title];
                 $linkTitles = array_values(array_unique($batchResult[$title] ?? []));
 
                 // 空応答: メタだけ記録（incoming_link_count=0 → 次回 stale で再取得）
