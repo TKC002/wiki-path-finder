@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\Log;
  */
 class WikipediaApiClient
 {
-    private const USER_AGENT = 'WikiPathFinder/1.0 (Laravel demo)';
+    private const USER_AGENT = 'WikiPathFinder/1.0 (takeshilingmu027@gmail.com)';
 
     private string $lang;
     private string $apiUrl;
