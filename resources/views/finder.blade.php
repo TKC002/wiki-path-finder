@@ -24,6 +24,12 @@
                 <div class="suggest-list" id="start_suggest" hidden></div>
             </div>
         </div>
+
+        {{-- ★ 入れ替えボタン --}}
+        <div class="swap-row">
+            <button type="button" id="swapBtn" class="swap-btn" title="スタートとゴールを入れ替え">⇅</button>
+        </div>
+        
         <div class="form-group">
             <label for="goal_input">🎯 ゴールページ</label>
             <div class="suggest-wrap" id="goal_wrap">

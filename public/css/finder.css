@@ -303,3 +303,29 @@ input[type=url]:focus {
 .depth-help b {
     color: #4a5568;
 }
+
+/* 入れ替えボタン */
+.swap-row {
+    display: flex;
+    justify-content: center;
+    margin: -0.25rem 0;
+}
+.swap-btn {
+    background: none;
+    border: 2px solid #e2e8f0;
+    border-radius: 50%;
+    width: 36px;
+    height: 36px;
+    font-size: 1.1rem;
+    color: #667eea;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.swap-btn:hover {
+    background: #667eea;
+    color: #fff;
+    border-color: #667eea;
+}

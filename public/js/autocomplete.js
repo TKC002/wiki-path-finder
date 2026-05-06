@@ -151,6 +151,15 @@ class Autocomplete {
         this.input.focus();
     }
 
+    getChipState() {
+        if (!this.wrap.classList.contains('has-chip')) return null;
+        const titleEl = this.chipBox.querySelector('.chip-title');
+        return {
+            title: titleEl ? titleEl.textContent : '',
+            url: this.hidden.value,
+        };
+    }
+
     show() { this.list.hidden = false; }
     hide() { this.list.hidden = true; this.activeIdx = -1; }
 }

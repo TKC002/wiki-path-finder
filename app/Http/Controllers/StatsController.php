@@ -35,7 +35,7 @@ class StatsController
             ->join('pages as p', 'p.id', '=', 's.page_id')
             ->whereRaw('s.step_index > 0')
             ->whereRaw('s.step_index < h.clicks')
-            ->select('p.title', DB::raw('COUNT(*) as appearances'))
+            ->select('p.title', DB::raw("COUNT(DISTINCT CONCAT(h.start_id, ',', h.goal_id)) as appearances"))
             ->groupBy('p.id', 'p.title')
             ->orderByDesc('appearances')
             ->limit(20)

@@ -154,6 +154,19 @@ class PathFinderController
                     'line' => $e->getLine(),
                     'file' => $e->getFile(),
                 ]);
+
+                // タイムアウトやクライアント切断も履歴に残す
+                $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
+                $this->recordFailedSearch(
+                    $start['title'],
+                    $goal['title'],
+                    $start['lang'],
+                    $durationMs,
+                    isset($finder) ? $finder->getApiCalls() : 0,
+                    isset($finder) ? $finder->getVisitedCount() : 0,
+                    isset($finder) ? $finder->getMaxDepthPerSide() : $depth
+                );
+
                 $send('error', ['message' => sprintf('[%s] %s', class_basename($e), $e->getMessage())]);
             }
 

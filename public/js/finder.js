@@ -37,6 +37,29 @@
         depthMaxEl.textContent = v * 2;
     });
 
+    document.getElementById('swapBtn').addEventListener('click', () => {
+        const sState = startAuto.getChipState();
+        const gState = goalAuto.getChipState();
+        const sInput = document.getElementById('start_input').value;
+        const gInput = document.getElementById('goal_input').value;
+
+        // 両方クリアしてから入れ替え
+        startAuto.clearChip();
+        goalAuto.clearChip();
+
+        if (gState) {
+            startAuto.setChip(gState.title, gState.url);
+        } else {
+            document.getElementById('start_input').value = gInput;
+        }
+
+        if (sState) {
+            goalAuto.setChip(sState.title, sState.url);
+        } else {
+            document.getElementById('goal_input').value = sInput;
+        }
+    });
+
     form.addEventListener('submit', (e) => {
         e.preventDefault();
 
