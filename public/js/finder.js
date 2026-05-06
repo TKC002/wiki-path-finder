@@ -69,11 +69,19 @@
             currentSource = null;
         }
 
-        const startUrl = document.getElementById('start_url').value.trim();
-        const goalUrl = document.getElementById('goal_url').value.trim();
+        // ★ チップ（hidden input）を優先、未選択ならテキスト入力欄をフォールバック
+        let startUrl = document.getElementById('start_url').value.trim();
+        let goalUrl = document.getElementById('goal_url').value.trim();
+
+        if (!startUrl) {
+            startUrl = document.getElementById('start_input').value.trim();
+        }
+        if (!goalUrl) {
+            goalUrl = document.getElementById('goal_input').value.trim();
+        }
 
         if (!startUrl || !goalUrl) {
-            alert('スタートとゴールの両方を選択してください。');
+            renderError('スタートとゴールの両方を入力してください。');
             return;
         }
 

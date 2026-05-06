@@ -76,11 +76,22 @@ class PathFinderController
             $start = WikipediaPathFinder::parseUrl($startUrl);
             $goal = WikipediaPathFinder::parseUrl($goalUrl);
 
+            // ★ URLとして解析できなかった場合、プレーンテキストをタイトルとして扱う
+            // 言語は相手のURLから推定するか、デフォルトで 'ja'
+            $fallbackLang = $start['lang'] ?? $goal['lang'] ?? 'ja';
+            if (!$start && trim($startUrl) !== '') {
+                $start = ['lang' => $fallbackLang, 'title' => trim($startUrl)];
+            }
+            if (!$goal && trim($goalUrl) !== '') {
+                $goal = ['lang' => $start['lang'] ?? $fallbackLang, 'title' => trim($goalUrl)];
+            }
+
             if (!$start || !$goal) {
-                $send('error', ['message' => '有効なWikipediaのURLを入力してください。']);
+                $send('error', ['message' => 'スタートとゴールの両方を入力してください。']);
                 $send('done', []);
                 return;
             }
+
             if ($start['lang'] !== $goal['lang']) {
                 $send('error', ['message' => 'スタートとゴールは同じ言語版である必要があります。']);
                 $send('done', []);
